@@ -174,7 +174,7 @@ flowchart TD
   linkStyle default stroke:#616161,stroke-width:1.5px
   linkStyle 0,4,7 stroke:#2e7d32,stroke-width:2px
   linkStyle 2,3,5,6,8,9,10,11 stroke:#1565c0,stroke-width:2px
-  linkStyle 15,21,22,23,24,25,26,27,30,31,33,34,35,36,39,42,43,44,45,46 stroke:#f9a825,stroke-width:2px
+  linkStyle 15,21,22,23,24,25,26,27,30,31,33,34,35,36,39,42,44,45,46 stroke:#f9a825,stroke-width:2px
 ```
 
 ## Label Meaning
