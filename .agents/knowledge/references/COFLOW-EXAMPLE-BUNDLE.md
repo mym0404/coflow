@@ -232,6 +232,13 @@ ambiguity:
       route: code_plus_decision
       track: verification
       question: Which broader suite should final verification run?
+      options:
+        - label: Broader HTTP suite
+          description: Run the existing broader HTTP integration coverage after the focused route test.
+          recommended: true
+        - label: Focused route only
+          description: Limit final verification to the new health endpoint contract.
+          recommended: false
     summary: Requirements are clear enough for bundle generation.
     round_count: 5
     scoring_temperature_intent: 0.1

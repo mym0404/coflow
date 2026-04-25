@@ -11,6 +11,7 @@ It currently ships two skills:
 ## Tech Stack
 
 - Python CLI: `skills/coplan/scripts/co.py`.
+- Codex subagent prompt/schema modules: `skills/coplan/scripts/co/agents/*.py`.
 - Codex skill manifests and instructions: `skills/*/SKILL.md`.
 - YAML metadata: `skills/*/agents/openai.yaml`.
 - User-facing Markdown docs: `COPLAN.md` and `COEXEC.md`.
@@ -30,7 +31,7 @@ It currently ships two skills:
 
 - Start with `.agents/knowledge/verification.md`.
 - There is no project-level test runner or CI config in this repository.
-- For CLI changes, use `python3 -m py_compile skills/coplan/scripts/co.py` and targeted `skills/coplan/scripts/co.py ...` command checks.
+- For CLI changes, use `python3 -m compileall -q skills/coplan/scripts/co.py skills/coplan/scripts/co` and targeted `skills/coplan/scripts/co.py ...` command checks.
 - For knowledge changes, verify root routing and repo-root-relative path references.
 - For semantic plan-exec quality checks, use `.agents/knowledge/semantic-verification.md` after mechanical verification.
 

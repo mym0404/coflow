@@ -31,6 +31,7 @@ A bundle is planner-ready only when:
 - `co.py flow init` records the initial request in `interview.yaml.initial_context`.
 - `co.py flow next/respond` records every material question and answer.
 - User-judgment answers require a matching pending question created by `co.py flow`.
+- Pending user questions carry 2-3 CLI-generated UI options with exactly one recommended option.
 - Route sources must match `from-code...`, `from-user...`, or `from-research...`.
 - Closure requires at least three answered rounds.
 - The six interview tracks are extraction labels, not a fixed user-question checklist.

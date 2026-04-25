@@ -1,7 +1,7 @@
 # Semantic Verification
 
 Semantic verification is a model-judged checklist for deciding whether coflow's shipped skill outputs preserve the intended Ouroboros-inspired plan-exec philosophy.
-Use it after mechanical verification when changes touch `skills/coplan/SKILL.md`, `skills/coexec/SKILL.md`, `skills/coplan/scripts/co.py`, `.agents/knowledge/references/*.md`, `COPLAN.md`, or `COEXEC.md`.
+Use it after mechanical verification when changes touch `skills/coplan/SKILL.md`, `skills/coexec/SKILL.md`, `skills/coplan/scripts/co.py`, `skills/coplan/scripts/co/agents/*.py`, `.agents/knowledge/references/*.md`, `COPLAN.md`, or `COEXEC.md`.
 
 ## Scope
 
@@ -12,6 +12,7 @@ Required inputs:
 - `skills/coplan/SKILL.md`
 - `skills/coexec/SKILL.md`
 - `skills/coplan/scripts/co.py`
+- `skills/coplan/scripts/co/agents/*.py`
 - `.agents/knowledge/index.md`
 - `.agents/knowledge/runtime.md`
 - `.agents/knowledge/verification.md`

@@ -12,6 +12,7 @@ The runtime has three roles:
 - Root agent: the Codex App or Codex CLI agent in the user-facing session.
 - `co.py` CLI: the flow manager and mechanical owner of state transitions.
 - Codex CLI agents: subprocess subagents launched by `co.py` for bounded JSON judgments.
+- `skills/coplan/scripts/co/agents/`: prompt, schema, spawn, and summary modules for those private Codex CLI agents.
 
 The root agent should interact with bundles through `skills/coplan/scripts/co.py flow`.
 The CLI prints YAML, and `root_action` is the next-step contract.
@@ -27,12 +28,11 @@ The reliable control point is therefore the `co.py flow` contract:
 - If `co.py` can decide or validate a step mechanically, prefer adding the rule to `skills/coplan/scripts/co.py` over relying on prose instructions in the root agent skill.
 - Mechanical continuation belongs inside `co.py`; root-facing `root_action` values must represent real root boundaries, not instructions to call another flow command.
 - Codex CLI subagents are implementation details of `co.py`; their JSON output is normalized by `co.py` before it reaches the root agent.
-- Codex CLI subagents run through isolated ephemeral `codex exec` calls with parent session env stripped, coflow nesting depth capped, and plugin feature loading disabled so MCP/plugin state from the parent session does not affect bounded JSON judgments while user-level Codex instructions remain available.
-- Interview routing, scoring thresholds, reviewer prompts, and reviewer schemas are CLI internals in `skills/coplan/scripts/co.py`, not root-agent reference material.
+- Codex CLI subagents run through `skills/coplan/scripts/co/agents/spawn.py` as isolated ephemeral `codex exec` calls with parent session env stripped, coflow nesting depth capped, and plugin feature loading disabled so MCP/plugin state from the parent session does not affect bounded JSON judgments while user-level Codex instructions remain available.
+- Interview routing and scoring thresholds are CLI internals in `skills/coplan/scripts/co.py`; subagent prompts, schemas, and summaries are CLI internals under `skills/coplan/scripts/co/agents/`. They are not root-agent reference material.
 - Root-facing `co.py flow` stdout should not expose internal scores, route or track metadata, reviewer findings, progress snapshots, or command allowlists unless that data is required to perform the current `root_action`.
 
 The plan and exec strategy is modeled after the local Ouroboros project, especially its specification-first interview, ambiguity gate, execution orchestration, and evaluation gate ideas.
-The local Ouroboros project root for live code comparison is `/Users/mj/projects/ouroboros`.
 Use `.agents/knowledge/references/OUROBOROUS.md` and the linked `OUROBOROS-PLAN`, `OUROBOROS-EXEC`, and `OUROBOROS-EVAL` reference docs when comparing design intent.
 Those references are advisory source material; coflow is a Codex App/CLI-specific adaptation and should not inherit every Ouroboros behavior by default.
 
@@ -100,7 +100,7 @@ Core flow:
 - initialize with `skills/coplan/scripts/co.py flow init --plan-id <id> --title "<title>" --stdin`.
 - let `flow init`, `flow respond`, and `flow evidence` advance internally until the next root boundary.
 - use `skills/coplan/scripts/co.py flow next` to resume an active bundle and ask the CLI for the next root boundary.
-- ask exact `root_action.question` values and pipe answers to `co.py flow respond --stdin`.
+- ask exact `root_action.question` values with the accompanying `root_action.options`, then pipe answers to `co.py flow respond --stdin`.
 - present exact `root_action.plan_seed` values and pipe approval or feedback to `co.py flow respond --stdin`.
 - run `coexec` when `root_action.type` becomes `execute_task` or `repair_task`; report and stop on `report_halt`, `report_complete`, or `report_error`.
 
@@ -130,4 +130,4 @@ If a needed change would alter user-visible behavior, acceptance criteria, task 
 - `.agents/knowledge/references/COFLOW-BUNDLE-SCHEMA.md` describes CLI-owned bundle files and required fields for maintenance.
 - `.agents/knowledge/references/COFLOW-GATES-AND-EXAMPLES.md` describes CLI-owned planner and executor gates for maintenance.
 - `.agents/knowledge/references/COFLOW-EXAMPLE-BUNDLE.md` is only a density and shape example.
-- Internal interview, closure audit, seed extraction, and bundle review algorithms live in `skills/coplan/scripts/co.py`; repo knowledge records the ownership rule, not a separate root-facing reference file.
+- Internal interview routing, closure audit, seed extraction, and bundle review orchestration live in `skills/coplan/scripts/co.py`; private subagent prompt/schema code lives in `skills/coplan/scripts/co/agents/`. Repo knowledge records the ownership rule, not a separate root-facing reference file.
