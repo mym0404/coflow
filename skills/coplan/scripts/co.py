@@ -137,6 +137,7 @@ FLOW_CONTRACT_VERSION = "1"
 FLOW_ROOT_ACTION_TYPES = {
     "ask_user",
     "present_plan_seed",
+    "notify_plan_done",
     "execute_task",
     "repair_task",
     "report_halt",
@@ -2297,6 +2298,14 @@ def present_plan_seed_action(plan_dir):
     }
 
 
+def notify_plan_done_action(bundle):
+    return {
+        "type": "notify_plan_done",
+        "active_plan": active_plan_summary(bundle),
+        "message": "플랜이 완료되었습니다. 실행을 시작하려면 coexec를 실행하세요.",
+    }
+
+
 def report_halt_action(bundle):
     return {"type": "report_halt", "halt": bundle["status"].get("halt")}
 
@@ -3614,7 +3623,11 @@ def print_flow_boundary(result):
     data = {
         "phase": bundle["status"].get("phase"),
     }
-    print_flow_result(data, action, mode=flow_mode_from_phase(bundle["status"].get("phase")))
+    print_flow_result(
+        data,
+        action,
+        mode=result.get("mode") or flow_mode_from_phase(bundle["status"].get("phase")),
+    )
 
 
 def flow_init(args):
@@ -3657,8 +3670,8 @@ def flow_respond(args):
         if feedback_result.get("root_action"):
             print_flow_boundary(feedback_result)
             return
-        result = advance_flow_until_boundary()
-        print_flow_boundary(result)
+        bundle = load_bundle()
+        print_flow_boundary({"mode": "planner", "root_action": notify_plan_done_action(bundle)})
         return
     interview = load_yaml(plan_dir / "interview.yaml")
     pending = interview.get("pending_user_question")

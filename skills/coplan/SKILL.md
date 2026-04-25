@@ -15,12 +15,13 @@ description: 사용자 요청을 `co.py flow`로 실행 가능한 plan bundle로
 - 실행 루프용 `co.py flow` 응답은 YAML이며 `contract_version`, `mode`, `phase`, `root_action`을 확인한다.
 - `co.py flow status`는 read-only 진단 YAML이며 root action source가 아니다.
 - `mode: planner`이면 Root agent는 반환된 `root_action` 하나만 수행한다.
-- `mode`가 `executor`, `halted`, `complete`이면 `root_action` payload를 해석하지 않고 `coexec`를 실행한다.
+- `mode`가 `error`이면 에러를 보고하고 멈춘다.
 - 사용자에게 물어야 할 내용은 `root_action.question` 그대로 묻는다.
 - 사용자에게 보여줄 계획 계약은 `root_action.plan_seed` 그대로 보여준다.
 - 사용자 요청, 답변, approval, feedback은 요약·번역·정리하지 않는다.
 - 사용자 답변, approval, feedback은 `co.py flow respond --stdin`으로 전달한다.
 - Bundle file은 CLI가 쓰는 실행 상태다. Root agent가 직접 수정하지 않는다.
+- `co.py` 의 모든 커맨드들은 내부 CLI의 처리 과정으로 인해 10분 이상 충분히 길어질 수 있으므로 커맨드를 임의로 중지하거나 재시도하지 않고 기다린다.
 
 ## Flow Stdout
 
@@ -48,7 +49,6 @@ Root agent는 값을 해석해 새 규칙을 만들지 않고, 현재 문서의 
 
 현재 root boundary의 큰 모드다.
 `planner`는 coplan이 계속 처리한다.
-`executor`, `halted`, `complete`는 planning이 끝났다는 뜻이므로 `coexec`를 실행한다.
 `error`는 사용자에게 보고하고 멈추는 모드다.
 
 ### `phase`
@@ -64,7 +64,7 @@ CLI가 내부 상태 전이, interview 판단, review, task 선택을 끝낸 뒤
 ### `root_action.type`
 
 `root_action`의 종류다.
-이 값이 `ask_user`, `present_plan_seed`, `report_error` 중 무엇인지 확인하고, 아래 같은 이름의 섹션만 따른다.
+이 값이 `ask_user`, `present_plan_seed`, `notify_plan_done`, `report_error` 중 무엇인지 확인하고, 아래 같은 이름의 섹션만 따른다.
 
 ### `root_action.*_command`
 
@@ -90,14 +90,13 @@ printf '%s\n' "<사용자 요청 원문>" | ~/.codex/skills/coplan/scripts/co.py
 ```
 
 이 명령은 CLI 내부 진행 후 첫 root boundary를 반환한다.
-내부 CLI의 처리 과정으로 인해 10분 이상 충분히 길어질 수 있으므로 커맨드를 임의로 중지하거나 재시도하지 않고 기다린다.
 
 ## Root Action 처리
 
 ### 공통 원칙
 
 `root_action.type`을 먼저 확인하고, 해당 action 하나만 수행한다.
-`mode`가 `planner`가 아니면 이 섹션의 action을 처리하지 않고 `coexec`를 실행한다.
+`mode`가 `error`이면 에러를 보고하고 멈춘다.
 `root_action`에 없는 다음 단계, 질문, 판단, 명령을 만들지 않는다.
 `co.py` CLI가 내부 Codex CLI subagent를 실행하더라도 Root agent는 subagent를 직접 호출하거나 결과를 해석하지 않는다.
 
@@ -154,6 +153,28 @@ CLI가 interview, ambiguity scoring, closure audit, bundle review를 통과해 �
 Root agent가 plan seed 내용을 다시 요약하거나 approval 여부를 대신 판단하지 않는다.
 사용자의 approval 또는 feedback은 요약·번역·정리하지 않고 `co.py flow respond --stdin`으로 전달한다.
 
+### `notify_plan_done`
+
+샘플 YAML:
+
+```yaml
+contract_version: '1'
+mode: planner
+phase: ready_for_exec
+root_action:
+  type: notify_plan_done
+  active_plan:
+    id: example-plan
+  message: 플랜이 완료되었습니다. 실행을 시작하려면 coexec를 실행하세요.
+```
+
+무엇인지:
+CLI가 plan seed approval과 bundle review를 완료했고, planning skill의 역할이 끝난 상태다.
+
+해야 할 일:
+`root_action.message`를 사용자에게 그대로 안내하고 멈춘다.
+Root agent가 실행 task를 직접 시작하거나 `co.py flow next`를 이어서 호출하지 않는다.
+
 ### `report_error`
 
 샘플 YAML:
@@ -192,7 +213,6 @@ root_action 처리
 반복
 ```
 
-Planning이 끝나면 `mode: executor`가 반환되고, root agent는 `coexec`를 실행한다.
 인터뷰가 충분해 보여도 `co.py flow`가 closure audit 질문을 `ask_user`로 반환할 수 있다. 이 경우에도 다른 질문과 동일하게 그대로 묻고 답변을
 전달한다.
 
