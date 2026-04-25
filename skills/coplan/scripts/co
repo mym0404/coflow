@@ -2829,29 +2829,7 @@ def flow_mode_from_phase(phase):
     return "unknown"
 
 
-def flow_allowed_commands(action_type):
-    if action_type in {"ask_user", "present_draft"}:
-        return ["co flow respond --stdin", "co flow status"]
-    if action_type == "execute_task":
-        return [
-            'co flow evidence --step <step-id> --command "..." --exit-code <code> --success true|false --stdin',
-            'co flow repair --field <path> --reason "..." --set|--add|--remove <yaml>',
-            'co flow halt --kind user_decision|external_environment --reason "..."',
-            "co flow status",
-        ]
-    if action_type == "repair_task":
-        return [
-            'co flow repair --field <path> --reason "..." --set|--add|--remove <yaml>',
-            'co flow evidence --step <step-id> --command "..." --exit-code <code> --success true|false --stdin',
-            'co flow halt --kind user_decision|external_environment --reason "..."',
-            "co flow status",
-        ]
-    if action_type == "continue_flow":
-        return ["co flow next", "co flow status"]
-    return ["co flow status"]
-
-
-def flow_result(data, root_action, *, mode=None, allowed_commands=None, forbidden_actions=None):
+def flow_result(data, root_action, *, mode=None):
     action_type = root_action.get("type")
     if action_type not in FLOW_ROOT_ACTION_TYPES:
         raise ExError(f"unknown flow root action: {action_type}")
@@ -2864,18 +2842,14 @@ def flow_result(data, root_action, *, mode=None, allowed_commands=None, forbidde
         if key not in {"ok", "mode"}:
             result[key] = value
     result["root_action"] = root_action
-    result["allowed_commands"] = allowed_commands or flow_allowed_commands(action_type)
-    result["forbidden_actions"] = forbidden_actions or FLOW_FORBIDDEN_ACTIONS
     return result
 
 
-def print_flow_result(data, root_action, *, mode=None, allowed_commands=None, forbidden_actions=None):
+def print_flow_result(data, root_action, *, mode=None):
     result = flow_result(
         data,
         root_action,
         mode=mode,
-        allowed_commands=allowed_commands,
-        forbidden_actions=forbidden_actions,
     )
     plan_dir = active_plan_dir_or_none()
     append_flow_log(
@@ -2884,7 +2858,6 @@ def print_flow_result(data, root_action, *, mode=None, allowed_commands=None, fo
         command=CURRENT_FLOW_COMMAND,
         mode=result.get("mode"),
         root_action=root_action.get("type"),
-        allowed_command_count=len(result.get("allowed_commands", [])),
     )
     append_flow_log(
         plan_dir,
@@ -2910,7 +2883,7 @@ def print_flow_error(message):
 
 
 def active_plan_summary(bundle):
-    return {"id": bundle["plan_id"], "dir": str(bundle["plan_dir"])}
+    return {"id": bundle["plan_id"]}
 
 
 def continue_flow_action(message):
@@ -2921,7 +2894,6 @@ def ask_user_action(pending):
     return {
         "type": "ask_user",
         "question": pending["question"],
-        "pending_user_question": pending,
         "response_command": "co flow respond --stdin",
     }
 
@@ -3943,16 +3915,12 @@ def status_flow_boundary():
     return {"root_action": action}
 
 
-def print_flow_boundary(result, extra=None):
+def print_flow_boundary(result):
     bundle = load_bundle()
     action = result["root_action"]
     data = {
-        "active_plan": active_plan_summary(bundle),
         "phase": bundle["status"].get("phase"),
-        "progress": status_groups(bundle),
     }
-    if extra:
-        data.update(extra)
     for key, value in result.items():
         if key != "root_action":
             data[key] = value
@@ -3968,7 +3936,7 @@ def flow_init(args):
         phase_after="drafting",
     )
     print_flow_result(
-        {"active_plan_id": args.plan_id, "plan_dir": str(plan_dir), "phase": "drafting"},
+        {"phase": "drafting"},
         continue_flow_action("Run `co flow next` to continue planning."),
         mode="planner",
     )
@@ -3999,7 +3967,7 @@ def flow_respond(args):
             print_flow_boundary(feedback_result)
             return
         result = advance_flow_until_boundary()
-        print_flow_boundary(result, extra={"feedback": feedback_result.get("feedback")})
+        print_flow_boundary(result)
         return
     interview = load_yaml(plan_dir / "interview.yaml")
     pending = interview.get("pending_user_question")
@@ -4023,7 +3991,7 @@ def flow_evidence(args):
     record = record_current_evidence(args.step, args.evidence_command, args.exit_code, args.success)
     if not record["success"]:
         bundle = load_bundle()
-        print_flow_boundary({"root_action": task_root_action(bundle, "repair_task")}, extra={"record": record})
+        print_flow_boundary({"root_action": task_root_action(bundle, "repair_task")})
         return
     bundle = load_bundle()
     current_id = bundle["status"].get("current_task")
@@ -4032,7 +4000,7 @@ def flow_evidence(args):
         if not required_evidence_missing(bundle, task):
             complete_task_internal(bundle, current_id)
     result = advance_flow_until_boundary()
-    print_flow_boundary(result, extra={"record": record})
+    print_flow_boundary(result)
 
 
 def flow_repair(args):
@@ -4069,7 +4037,7 @@ def flow_repair(args):
         reason_hash=hash_text(args.reason),
     )
     bundle = load_bundle()
-    print_flow_boundary({"root_action": task_root_action(bundle, "execute_task")}, extra={"note": note})
+    print_flow_boundary({"root_action": task_root_action(bundle, "execute_task")})
 
 
 def flow_halt(args):
@@ -4109,7 +4077,7 @@ def flow_halt(args):
         reason_hash=hash_text(args.reason),
     )
     bundle = load_bundle()
-    print_flow_boundary({"root_action": report_halt_action(bundle)}, extra={"note": note})
+    print_flow_boundary({"root_action": report_halt_action(bundle)})
 
 
 def build_parser():
@@ -4203,7 +4171,7 @@ def main(argv=None):
             log_flow_command_error(str(exc))
             print_flow_result(
                 data,
-                continue_flow_action(exc.required_action),
+                continue_flow_action("Fix the reported flow state, then rerun `co flow next`."),
                 mode="error",
             )
         else:

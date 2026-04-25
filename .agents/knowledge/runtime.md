@@ -26,6 +26,8 @@ The reliable control point is therefore the `co flow` contract:
 - Root-agent-facing skill instructions should keep the agent as a thin `root_action` adapter.
 - If `co` can decide or validate a step mechanically, prefer adding the rule to `skills/coplan/scripts/co` over relying on prose instructions in the root agent skill.
 - Codex CLI subagents are implementation details of `co`; their JSON output is normalized by `co` before it reaches the root agent.
+- Interview routing, scoring thresholds, reviewer prompts, and reviewer schemas are CLI internals in `skills/coplan/scripts/co`, not root-agent reference material.
+- Root-facing `co flow` stdout should not expose internal scores, route or track metadata, reviewer findings, progress snapshots, or command allowlists unless that data is required to perform the current `root_action`.
 
 The plan and exec strategy is modeled after the local Ouroboros project, especially its specification-first interview, ambiguity gate, execution orchestration, and evaluation gate ideas.
 Use `.agents/knowledge/references/OUROBOROUS.md` and the linked `OUROBOROS-PLAN`, `OUROBOROS-EXEC`, and `OUROBOROS-EVAL` reference docs when comparing design intent.
@@ -38,21 +40,22 @@ Keep planning and execution concepts synchronized whenever changing either side 
 - When changing the executable plan bundle, planner gates, task schema, or `exec.yaml` handoff, verify that `coexec` can still execute the approved plan without making new planning decisions.
 - When changing executor behavior, status output, repair rules, evidence handling, halt rules, or finish gates, verify that `coplan` still produces a bundle with enough static contract for that executor.
 - The planner side owns the approved user contract; the executor side owns sequential local execution, progress state, evidence, repair, halt, and finish.
-- If a behavior change blurs that boundary, update `skills/coplan/SKILL.md`, `skills/coexec/SKILL.md`, `skills/coplan/references/root-agent-co-guide.md`, `skills/coplan/references/bundle-schema.md`, `skills/coplan/references/gates-and-examples.md`, `skills/coplan/references/workflow.md`, `skills/coexec/references/workflow.md`, and `skills/coplan/scripts/co` together.
+- If a behavior change blurs that boundary, update `skills/coplan/SKILL.md`, `skills/coexec/SKILL.md`, and `skills/coplan/scripts/co` together. Update `.agents/knowledge/references/COFLOW-BUNDLE-SCHEMA.md` or `.agents/knowledge/references/COFLOW-GATES-AND-EXAMPLES.md` only when CLI-owned schema or gate details change.
 
 ## Workflow Docs
 
-Keep user-facing graphs and agent-facing workflow references synchronized with runtime behavior.
+Keep user-facing graphs and root-agent skill prompts synchronized with runtime behavior.
 
 - `COPLAN.md` and `COEXEC.md` are user-facing docs and the only Mermaid graph home.
 - User-facing graph docs must contain both Mermaid graph types: `sequenceDiagram` for actor and time order, and `flowchart` for branches, loops, and parallel or repeated work.
 - User-facing Mermaid flowcharts use consistent role labels and styling: green for `[유저]`, blue for `[추론기계]`, gray for `[기계]`, and yellow for `[추론형식]`.
-- `skills/coplan/references/workflow.md` is the graph-free planner workflow reference for agents.
-- `skills/coexec/references/workflow.md` is the graph-free executor workflow reference for agents.
-- Agent-facing workflow references should use tables, root action contracts, state ownership rules, gates, and non-negotiable boundaries instead of Mermaid diagrams.
-- When changing planner or executor state transitions, root actions, interview loops, review loops, draft feedback handling, evidence handling, repair, halt, or finish behavior, update the relevant user-facing graph doc and the relevant graph-free workflow reference in the same change.
-- Planner parallel reviewer execution must stay visible in `COPLAN.md` and `skills/coplan/references/workflow.md`; executor single-current-task execution must stay visible in `COEXEC.md` and `skills/coexec/references/workflow.md`.
-- Agent-facing skill context should read `skills/*/references/workflow.md`, not `COPLAN.md` or `COEXEC.md`.
+- `skills/coplan/SKILL.md` contains the root-agent planner workflow prompt.
+- `skills/coexec/SKILL.md` contains the root-agent executor workflow prompt.
+- `skills/*/references/` is not used.
+- Project maintenance references must live under `.agents/knowledge/`, not under `skills/*/references/`.
+- Skill prompts should use concise tables, root action contracts, and execution loops instead of Mermaid diagrams.
+- When changing planner or executor state transitions, root actions, interview loops, review loops, draft feedback handling, evidence handling, repair, halt, or finish behavior, update the relevant user-facing graph doc and the relevant `SKILL.md` in the same change.
+- Planner parallel reviewer execution must stay visible in `COPLAN.md` and `skills/coplan/SKILL.md`; executor single-current-task execution must stay visible in `COEXEC.md` and `skills/coexec/SKILL.md`.
 
 ## Flow Log
 
@@ -116,11 +119,9 @@ If a needed change would alter user-visible behavior, acceptance criteria, task 
 
 ## Reference Tier
 
-- `skills/coplan/references/workflow.md` describes the graph-free planner workflow for agents.
-- `skills/coexec/references/workflow.md` describes the graph-free executor workflow for agents.
-- `skills/coplan/references/root-agent-co-guide.md` describes the shared `co flow` stdout contract.
-- `skills/coplan/references/bundle-schema.md` describes bundle files and required fields.
-- `skills/coplan/references/gates-and-examples.md` describes planner and executor gates.
-- `skills/coplan/references/interview-algorithm.md` describes ambiguity scoring and interview routing internals.
-- `skills/coplan/references/codex-cli-reviewer.md` describes pre-draft review behavior.
-- `skills/coplan/references/example-bundle.md` is only a density and shape example.
+- `skills/coplan/SKILL.md` describes the root-agent planner workflow and `co flow` stdout contract.
+- `skills/coexec/SKILL.md` describes the root-agent executor workflow and `co flow` stdout contract.
+- `.agents/knowledge/references/COFLOW-BUNDLE-SCHEMA.md` describes CLI-owned bundle files and required fields for maintenance.
+- `.agents/knowledge/references/COFLOW-GATES-AND-EXAMPLES.md` describes CLI-owned planner and executor gates for maintenance.
+- `.agents/knowledge/references/COFLOW-EXAMPLE-BUNDLE.md` is only a density and shape example.
+- Internal interview and pre-draft review algorithms live in `skills/coplan/scripts/co`; repo knowledge records the ownership rule, not a separate root-facing reference file.

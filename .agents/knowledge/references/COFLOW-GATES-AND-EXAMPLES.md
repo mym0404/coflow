@@ -1,6 +1,7 @@
 # Gates And Examples
 
 This file defines the plan-execute gates enforced by `co flow`.
+It is a CLI maintenance reference, not default root-agent context.
 
 ## Planner Readiness Gate
 

@@ -14,7 +14,8 @@ It currently ships two skills:
 - Codex skill manifests and instructions: `skills/*/SKILL.md`.
 - YAML metadata: `skills/*/agents/openai.yaml`.
 - User-facing Markdown docs: `COPLAN.md` and `COEXEC.md`.
-- Agent-facing skill references: `skills/coplan/references/*.md` and `skills/coexec/references/*.md`.
+- Root-agent skill runtime prompts: `skills/coplan/SKILL.md` and `skills/coexec/SKILL.md`.
+- Project maintenance knowledge references: `.agents/knowledge/references/COFLOW-*.md`.
 
 ## Runtime Start
 
@@ -42,5 +43,7 @@ It currently ships two skills:
 - Runtime and architecture: `.agents/knowledge/runtime.md`.
 - Verification and blind spots: `.agents/knowledge/verification.md`.
 - Ouroboros inspiration references: `.agents/knowledge/references/OUROBOROUS.md`.
-- Skill source docs remain under `skills/` because those files are the shipped product content, not a secondary knowledge home.
+- Skill source docs remain under `skills/` because those files are root-agent runtime skill content, not a secondary knowledge home.
+- `skills/*/references/` is not used; all root-agent runtime instructions belong directly in `skills/*/SKILL.md`.
+- Bundle schema, gate details, example bundles, and other project maintenance documents belong under `.agents/knowledge/`.
 - `COPLAN.md` and `COEXEC.md` are user-facing docs, not agent-facing knowledge routes.

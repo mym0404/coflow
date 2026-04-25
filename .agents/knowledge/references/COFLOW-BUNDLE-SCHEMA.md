@@ -2,6 +2,7 @@
 
 Each active plan is selected by `.agents/plan/exec.yaml` and stored under `.agents/plan/{plan-id}/`.
 Use `~/.codex/skills/coplan/scripts/co flow` for CLI-owned state. Direct root-agent edits to bundle files are not part of the public workflow.
+This is a CLI maintenance reference, not default root-agent context.
 
 ## Directory Layout
 

@@ -1,85 +1,114 @@
 ---
 name: coplan
-description: Planner-only skill that turns a rough idea into a decision-complete plan-execute bundle through `co flow`.
+description: 사용자 요청을 `co flow`로 실행 가능한 plan bundle로 정리하는 root-agent용 planner 스킬.
 ---
 
 # Coplan
 
-Turn a rough idea into an executable `.agents/plan/{plan-id}/` bundle through the single `co flow` iterator.
+너는 이 스킬을 실행하는 root agent다.
 
-You are the user-facing planner adapter. You do not choose interview routing, ambiguity scoring, draft feedback re-entry, review gates, bundle finalization, or executor handoff. Use `~/.codex/skills/coplan/scripts/co flow ...` and follow `root_action`.
+목표는 사용자 요청을 `co flow`에 전달하고, CLI가 돌려주는 `root_action`을 수행해서 실행 가능한 `.agents/plan/{plan-id}/` plan bundle을 만드는 것이다. 이 스킬을 사용하는 동안 실제 source code 구현은 하지 않는다.
 
-## Core Principles
+## 핵심 계약
 
-- `Flow Only`: use `co flow init`, `co flow next`, and `co flow respond --stdin` as the root-facing planning API.
-- `Root Action Contract`: every `co flow` YAML response includes `contract_version`, `mode`, `root_action`, `allowed_commands`, and `forbidden_actions`.
-- `No Flow Decisions`: do not compute readiness, next questions, ambiguity, closure, review status, approval routing, or execution status yourself.
-- `No Bundle Patching`: do not directly patch `draft.md`, `plan.yaml`, `tasks.yaml`, `interview.yaml`, `status.yaml`, `notes.yaml`, or `evidence.yaml`.
-- `Transport Only`: ask the exact `root_action.question`, present the exact `root_action.draft`, and send user replies back through `co flow respond --stdin`.
-- `Planner Only`: do not implement source changes while using this skill.
+- `co flow`가 다음 행동을 `root_action`으로 반환한다.
+- 모든 `co flow` 응답은 YAML이며 `ok`, `contract_version`, `mode`, `phase`, `root_action`을 확인한다.
+- Root agent는 반환된 `root_action` 하나만 수행한다.
+- 사용자에게 물어야 할 내용은 `root_action.question` 그대로 묻는다.
+- 사용자에게 보여줄 draft는 `root_action.draft` 그대로 보여준다.
+- 사용자 답변, approval, feedback은 `co flow respond --stdin`으로 전달한다.
+- Bundle file은 CLI가 쓰는 실행 상태다. Root agent가 직접 수정하지 않는다.
+- `root_action.type`이 executor action으로 바뀌면 `coplan`을 끝내고 `coexec`로 전환한다.
 
-## Required Context
+## Flow Stdout
 
-Always read these context docs first before running `co flow` with this skill.
+`co flow`는 아래 핵심 필드를 포함한 YAML을 반환한다.
 
-Read [references/root-agent-co-guide.md](references/root-agent-co-guide.md) for the root-agent, CLI, Codex CLI subagent, stdout YAML, `root_action`, allowed command, and forbidden action contract.
+```yaml
+ok: true
+contract_version: '1'
+mode: planner|executor|halted|complete|error
+phase: drafting
+root_action:
+  type: ask_user|present_draft|execute_task|repair_task|report_halt|report_complete|continue_flow
+```
 
-Read [references/workflow.md](references/workflow.md) as the synchronized structured workflow reference for how user, root agent, `co` CLI, Codex CLI agents, and bundle files interact.
+`ok: false`이면 `error`와 `root_action`을 함께 보고 다음 행동을 정한다.
+`ok: true`이면 `root_action.type`에 맞는 행동 하나만 수행한다.
 
-Use [references/bundle-schema.md](references/bundle-schema.md) and [references/gates-and-examples.md](references/gates-and-examples.md) to understand the plan-execute contract that `co flow` enforces. Use [references/interview-algorithm.md](references/interview-algorithm.md) and [references/codex-cli-reviewer.md](references/codex-cli-reviewer.md) only as maintenance or debugging context for CLI internals.
+## 시작
 
-These references explain the system boundary. They do not authorize calling removed commands, choosing hidden flow steps, or editing CLI-owned bundle files.
-
-## Bundle Contract
-
-Start every new plan with:
+새 plan은 아래 명령으로 시작한다.
 
 ```bash
 ~/.codex/skills/coplan/scripts/co flow init --plan-id <stable-kebab-id> --title "<title>"
 ```
 
-Then continue with:
+그다음 아래 명령으로 다음 경계를 받는다.
 
 ```bash
 ~/.codex/skills/coplan/scripts/co flow next
 ```
 
-The active pointer and bundle layout are:
+## Root Action 처리
+
+| `root_action.type` | 수행 |
+|---|---|
+| `continue_flow` | `root_action.next_command`를 실행한다. 보통 `co flow next`다. |
+| `ask_user` | `root_action.question`을 그대로 사용자에게 묻고 답변을 `co flow respond --stdin`으로 전달한다. |
+| `present_draft` | `root_action.draft`를 그대로 사용자에게 보여주고 approval 또는 feedback을 `co flow respond --stdin`으로 전달한다. |
+| `execute_task` | Planning이 끝난 상태다. `coexec`로 전환한다. |
+| `repair_task` | Execution 경계다. `coexec`로 전환한다. |
+| `report_halt` | Halt 내용을 사용자에게 보고한다. |
+| `report_complete` | 완료 내용을 사용자에게 보고한다. |
+
+## Planning Workflow
+
+| 주체 | 역할 |
+|---|---|
+| User | 요청, 답변, draft approval 또는 feedback을 제공한다. |
+| Root agent | `co flow`를 실행하고, 질문과 draft를 사용자에게 전달하고, 사용자 응답을 CLI로 되돌려 보낸다. |
+| `co` CLI | 다음 root boundary를 `root_action`으로 반환하고 bundle state를 기록한다. |
+
+기본 흐름은 아래와 같다.
 
 ```text
-.agents/plan/
-  exec.yaml
-  {plan-id}/
-    draft.md
-    plan.yaml
-    tasks.yaml
-    planning_context.yaml
-    interview.yaml
-    status.yaml
-    notes.yaml
-    evidence.yaml
-    evidence/
+co flow init
+co flow next
+root_action 처리
+co flow respond --stdin 또는 co flow next
+반복
 ```
 
-All bundle files are CLI-owned. `co flow` writes interview state, draft content, plan/tasks, review state, execution state, notes, and evidence records.
+Planning이 끝나면 `root_action.type: execute_task`가 반환되고, root agent는 `coexec`로 전환한다.
 
-## Planner Loop
+## 명령 제한
 
-- If `root_action.type: ask_user`, ask `root_action.question` exactly and pipe the answer to `co flow respond --stdin`.
-- If `root_action.type: present_draft`, show `root_action.draft` to the user and pipe approval or feedback to `co flow respond --stdin`.
-- If `root_action.type: continue_flow`, run the command named by `root_action.next_command`.
-- If `root_action.type` is an executor action, stop using `coplan` and switch to `coexec`.
-- Never call removed `co planner ...`, `co exec ...`, or `co note append ...` commands.
+사용하는 mutation command는 아래뿐이다.
 
-## What `co flow` Owns
+```bash
+~/.codex/skills/coplan/scripts/co flow init --plan-id <id> --title "<title>" [--replace]
+~/.codex/skills/coplan/scripts/co flow next
+~/.codex/skills/coplan/scripts/co flow respond --stdin
+```
 
-- Interview routing, pending question metadata, user answer recording, ambiguity scoring, track closure, and closure checks.
-- Planning context generation, bundle authoring, validation, pre-draft review, review repair attempts, draft feedback classification, approval, and finalization.
-- Executor handoff through `status.yaml.phase`.
+필요하면 read-only/diagnostic command는 사용할 수 있다.
 
-## Output Expectations
+```bash
+~/.codex/skills/coplan/scripts/co current
+~/.codex/skills/coplan/scripts/co show --file draft|plan|tasks|status|notes|evidence
+~/.codex/skills/coplan/scripts/co doctor
+```
 
-- If a bundle is created, report the active plan from `co current`.
-- Report the current `root_action.type` and any open user boundary.
-- If planning stops early, name the `co flow` error or root action.
-- Do not commit, branch, push, or open a PR unless explicitly asked.
+## 금지 사항
+
+- `draft.md`, `plan.yaml`, `tasks.yaml`, `planning_context.yaml`, `interview.yaml`, `status.yaml`, `notes.yaml`, `evidence.yaml`을 직접 수정하지 않는다.
+- `root_action`에 없는 다음 단계를 임의로 만들지 않는다.
+- Planning 중 source code를 구현하지 않는다.
+- 명시적으로 요청받기 전에는 commit, branch, push, PR을 만들지 않는다.
+
+## 보고 기준
+
+- 현재 plan이 생겼으면 `co current` 기준으로 active plan을 보고한다.
+- 사용자 입력이 필요한 상태면 질문 또는 draft만 보여준다.
+- 중간에 멈추면 `co flow`가 반환한 error 또는 halt 내용을 그대로 설명한다.

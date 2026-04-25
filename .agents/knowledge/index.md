@@ -28,15 +28,16 @@ coflow contains Codex skills that coordinate a plan-then-execute workflow throug
 - Ouroboros eval reference: `.agents/knowledge/references/OUROBOROS-EVAL.md`.
 - Planner source contract: `skills/coplan/SKILL.md`.
 - Executor source contract: `skills/coexec/SKILL.md`.
-- Planner workflow reference: `skills/coplan/references/workflow.md`.
-- Executor workflow reference: `skills/coexec/references/workflow.md`.
-- Shared CLI guide: `skills/coplan/references/root-agent-co-guide.md`.
-- Bundle schema: `skills/coplan/references/bundle-schema.md`.
+- Bundle schema maintenance reference: `.agents/knowledge/references/COFLOW-BUNDLE-SCHEMA.md`.
+- Gate and example maintenance reference: `.agents/knowledge/references/COFLOW-GATES-AND-EXAMPLES.md`.
+- Example bundle maintenance reference: `.agents/knowledge/references/COFLOW-EXAMPLE-BUNDLE.md`.
 
 ## Product Docs
 
 The Markdown and YAML files under `skills/` are installed skill content and product documentation.
 Do not migrate them into `.agents/knowledge` unless the skill layout itself is being redesigned.
+`skills/*/references/` is not used; root-agent runtime instructions live directly in `skills/*/SKILL.md`.
+Project maintenance docs belong under `.agents/knowledge/`.
 `COPLAN.md` and `COEXEC.md` are user-facing docs; do not use them as agent-facing workflow references.
 
 ## UI Surface
