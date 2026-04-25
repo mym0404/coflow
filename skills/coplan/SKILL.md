@@ -12,7 +12,7 @@ description: 사용자 요청을 `co flow`로 실행 가능한 plan bundle로 �
 ## 핵심 계약
 
 - `co flow`가 다음 행동을 `root_action`으로 반환한다.
-- 모든 `co flow` 응답은 YAML이며 `ok`, `contract_version`, `mode`, `phase`, `root_action`을 확인한다.
+- 모든 `co flow` 응답은 YAML이며 `contract_version`, `mode`, `phase`, `root_action`을 확인한다.
 - Root agent는 반환된 `root_action` 하나만 수행한다.
 - 사용자에게 물어야 할 내용은 `root_action.question` 그대로 묻는다.
 - 사용자에게 보여줄 draft는 `root_action.draft` 그대로 보여준다.
@@ -22,19 +22,50 @@ description: 사용자 요청을 `co flow`로 실행 가능한 plan bundle로 �
 
 ## Flow Stdout
 
-`co flow`는 아래 핵심 필드를 포함한 YAML을 반환한다.
+`co flow`는 root agent가 처리해야 할 정보만 YAML로 반환한다.
 
 ```yaml
-ok: true
 contract_version: '1'
 mode: planner|executor|halted|complete|error
 phase: drafting
 root_action:
-  type: ask_user|present_draft|execute_task|repair_task|report_halt|report_complete|continue_flow
+  type: continue_flow|ask_user|present_draft|execute_task|repair_task|report_halt|report_complete|report_error
 ```
 
-`ok: false`이면 `error`와 `root_action`을 함께 보고 다음 행동을 정한다.
-`ok: true`이면 `root_action.type`에 맞는 행동 하나만 수행한다.
+`phase`는 active plan 상태다.
+에러도 `mode: error`와 `root_action.type: report_error`로 표현된다.
+항상 `root_action.type`에 맞는 행동 하나만 수행한다.
+
+Planner에서 주로 받는 `root_action` 모양은 아래와 같다.
+
+```yaml
+root_action:
+  type: continue_flow
+  message: Run `co flow next` to continue planning.
+  next_command: co flow next
+```
+
+```yaml
+root_action:
+  type: ask_user
+  question: 사용자에게 그대로 전달할 질문
+  response_command: co flow respond --stdin
+```
+
+```yaml
+root_action:
+  type: present_draft
+  draft: 사용자에게 그대로 보여줄 draft 본문
+  response_command: co flow respond --stdin
+```
+
+```yaml
+root_action:
+  type: report_error
+  message: CLI가 보고한 에러 내용
+```
+
+`execute_task` 또는 `repair_task`가 오면 planning이 끝났거나 execution 경계에 도달한 것이다. 이 스킬을 끝내고 `coexec` 스킬로 전환한다.
 
 ## 시작
 
@@ -61,6 +92,7 @@ root_action:
 | `repair_task` | Execution 경계다. `coexec`로 전환한다. |
 | `report_halt` | Halt 내용을 사용자에게 보고한다. |
 | `report_complete` | 완료 내용을 사용자에게 보고한다. |
+| `report_error` | `root_action.message`를 사용자에게 보고하고 멈춘다. |
 
 ## Planning Workflow
 
@@ -84,12 +116,13 @@ Planning이 끝나면 `root_action.type: execute_task`가 반환되고, root age
 
 ## 명령 제한
 
-사용하는 mutation command는 아래뿐이다.
+Planning 중 사용하는 flow command는 아래뿐이다.
 
 ```bash
 ~/.codex/skills/coplan/scripts/co flow init --plan-id <id> --title "<title>" [--replace]
 ~/.codex/skills/coplan/scripts/co flow next
 ~/.codex/skills/coplan/scripts/co flow respond --stdin
+~/.codex/skills/coplan/scripts/co flow status
 ```
 
 필요하면 read-only/diagnostic command는 사용할 수 있다.
@@ -111,4 +144,4 @@ Planning이 끝나면 `root_action.type: execute_task`가 반환되고, root age
 
 - 현재 plan이 생겼으면 `co current` 기준으로 active plan을 보고한다.
 - 사용자 입력이 필요한 상태면 질문 또는 draft만 보여준다.
-- 중간에 멈추면 `co flow`가 반환한 error 또는 halt 내용을 그대로 설명한다.
+- 중간에 멈추면 `report_error` 또는 `report_halt` 내용을 그대로 설명한다.

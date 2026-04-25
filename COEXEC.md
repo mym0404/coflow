@@ -1,7 +1,7 @@
-# Coexec Runtime Graphs
+# Coexec 흐름도
 
-This document maps the runtime flow for `coexec`.
-The root agent must execute only the current task returned by `co flow` and send verification output back through `co flow evidence`.
+이 문서는 `coexec`가 승인된 plan bundle을 current task 단위로 실행하는 흐름을 보여주는 사용자용 문서다.
+그래프의 초점은 `co flow`가 task 선택과 completion을 관리하고, root agent가 구현과 검증 실행을 맡는 방식이다.
 
 ## Sequence Diagram
 
@@ -12,29 +12,29 @@ sequenceDiagram
   participant Shell as local shell
 
   Root->>Co: [추론기계] co flow next
-  Co->>Co: [기계] start execution if ready_for_exec
-  Co->>Co: [기계] claim first ready task if no current task
+  Co->>Co: [기계] ready_for_exec이면 execution 시작
+  Co->>Co: [기계] current task가 없으면 ready task claim
   Co-->>Root: [기계] root_action=execute_task
 
-  loop until report_complete or report_halt
-    Root->>Root: [추론기계] edit source within root_action.task only
-    Root->>Shell: [추론기계] run task verification command
-    Shell-->>Root: [기계] output and exit code
+  loop report_complete 또는 report_halt까지
+    Root->>Root: [추론기계] current task 범위 구현
+    Root->>Shell: [추론기계] task verification command 실행
+    Shell-->>Root: [기계] output과 exit code
     Root->>Co: [추론기계] co flow evidence --stdin
-    Co->>Co: [기계] record evidence artifact and manifest entry
-    alt evidence succeeds and completion gate passes
-      Co->>Co: [기계] mark task Done
-      alt another task is ready
-        Co->>Co: [기계] claim next ready task
+    Co->>Co: [기계] evidence artifact와 manifest 기록
+    alt evidence 성공과 completion gate 통과
+      Co->>Co: [기계] task Done 처리
+      alt 다음 ready task 있음
+        Co->>Co: [기계] 다음 ready task claim
         Co-->>Root: [기계] root_action=execute_task
-      else all tasks and final verification are Done
-        Co->>Co: [기계] finish execution
+      else 모든 task와 final verification 완료
+        Co->>Co: [기계] execution finish
         Co-->>Root: [기계] root_action=report_complete
       end
-    else evidence fails
-      Co->>Co: [기계] keep task Doing and append risk note
+    else evidence 실패
+      Co->>Co: [기계] task Doing 유지와 risk note 기록
       Co-->>Root: [기계] root_action=repair_task
-      Root->>Root: [추론기계] repair within current task contract
+      Root->>Root: [추론기계] current task 범위 수정
     end
   end
 ```
@@ -43,52 +43,41 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-  Start(["[추론기계] enter coexec"])
-  Next["[추론기계] root runs co flow next"]
-  Phase{"[기계] phase"}
+  Start(["[유저] plan 승인"])
+  Handoff["[추론기계] execution 진입"]
+  Task["[기계] approved task를 current로 지정"]
+  Implement["[추론기계] current task 구현"]
+  Verify["[추론기계] task verification 실행"]
+  Evidence{"[기계] verification accepted?"}
+  Blocked{"[추론기계] contract 변경 필요?"}
+  Repair["[추론기계] current task 수정"]
+  Halt(["[추론기계] halt 보고"])
+  Done["[기계] task done 처리"]
+  More{"[기계] 남은 approved task?"}
+  Complete(["[추론기계] completion 보고"])
 
-  Start --> Next --> Phase
-
-  Phase -->|ready_for_exec| StartExec["[기계] set phase=executing"]
-  StartExec --> Phase
-  Phase -->|executing| Current{"current_task exists?"}
-  Phase -->|halted| EmitHalt["emit root_action=report_halt"]
-  Phase -->|complete| EmitComplete["emit root_action=report_complete"]
-
-  Current -->|yes| EmitExecute["emit root_action=execute_task"]
-  Current -->|no| Ready{"ready task exists?"}
-  Ready -->|yes| Claim["[기계] claim first ready task"]
-  Claim --> EmitExecute
-  Ready -->|no| Finish{"all tasks and final verification Done?"}
-  Finish -->|yes| MarkComplete["[기계] finish execution"]
-  MarkComplete --> EmitComplete
-  Finish -->|no| HaltNeeded["[기계] no valid next execution boundary"]
-
-  EmitExecute --> Implement["[추론기계] root edits only root_action.task"]
-  Implement --> Verify["[추론기계] root runs verification command"]
-  Verify --> Evidence["[추론기계] pipe output to co flow evidence"]
-  Evidence --> EvidenceResult{"[기계] evidence success?"}
-
-  EvidenceResult -->|false| Risk["[기계] record risk note and keep task Doing"]
-  Risk --> EmitRepair["emit root_action=repair_task"]
-  EmitRepair --> Repair["[추론기계] repair within current task contract"]
+  Start --> Handoff
+  Handoff --> Task
+  Task --> Implement
+  Implement --> Verify
+  Verify --> Evidence
+  Evidence -->|no| Blocked
+  Blocked -->|yes| Halt
+  Blocked -->|no| Repair
   Repair --> Verify
-
-  EvidenceResult -->|true| Required{"required evidence now complete?"}
-  Required -->|no| EmitExecute
-  Required -->|yes| Done["[기계] mark current task Done and clear current_task"]
-  Done --> Phase
-
-  EmitHalt --> ReportHalt(["[추론기계] root reports halt"])
-  EmitComplete --> ReportComplete(["[추론기계] root reports completion"])
-  HaltNeeded --> FlowError(["[기계] emit flow error"])
+  Evidence -->|yes| Done
+  Done --> More
+  More -->|yes| Task
+  More -->|no| Complete
 
   linkStyle default stroke:#616161,stroke-width:1.5px
-  linkStyle 0,15,16,17,21,22,27,28 stroke:#1565c0,stroke-width:2px
+  linkStyle 0 stroke:#2e7d32,stroke-width:2px
+  linkStyle 1,3,4,6,7,8,12 stroke:#1565c0,stroke-width:2px
 ```
 
 ## Label Meaning
 
-- `[기계]`: code-executed deterministic work such as state transition, evidence write, task claim, task completion, halt, or finish.
-- `[추론기계]`: root-agent action that edits source, runs verification, calls `co flow`, or reports a returned root action.
-- Flowchart edge colors match the same roles: blue for `[추론기계]` and gray for `[기계]`.
+- `[기계]`: state transition, evidence write, task claim, task completion, halt, finish처럼 코드로 실행되는 단계.
+- `[추론기계]`: root agent가 source를 수정하거나 verification을 실행하거나 `co flow`를 호출하거나 반환된 action을 보고하는 단계.
+- `[유저]`: plan 승인처럼 사용자가 흐름을 시작시키는 입력.
+- Flowchart edge 색상은 같은 역할을 따른다. blue는 `[추론기계]`, gray는 `[기계]`, green은 `[유저]`다.

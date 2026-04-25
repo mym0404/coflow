@@ -16,7 +16,7 @@ Use the smallest command that matches the changed surface:
 - Skill runtime prompt placement: verify that `skills/*/references/` does not exist or contains no files; root-agent runtime instructions must live directly in `skills/*/SKILL.md`.
 - Skill stdout contract: verify that `co flow` stdout YAML and `root_action` handling rules live directly in `skills/coplan/SKILL.md` and `skills/coexec/SKILL.md`, not in a separate shared reference file.
 - Maintenance knowledge placement: verify that bundle schema, gate examples, and example bundles live under `.agents/knowledge/references/`, not under `skills/*/references/`.
-- Skill prompt hard gate: verify that `skills/*/SKILL.md` says the agent is the root agent, contains the essential execution workflow directly, and uses references only as supplemental runtime guides.
+- Skill prompt hard gate: verify that `skills/*/SKILL.md` says the agent is the root agent and contains the essential execution workflow directly.
 - Skill content hard gate: verify that `skills/*/SKILL.md` does not contain maintenance-history wording, old-vs-new explanations, or internal-algorithm responsibility disclaimers that the root agent does not need to perform the skill.
 - Internal algorithm placement: verify that interview and pre-draft review algorithms are not routed as skill references; implementation details should stay in `skills/coplan/scripts/co` with only ownership guidance in repo knowledge.
 
@@ -42,4 +42,4 @@ For knowledge-only changes, verify:
 - `skills/*/SKILL.md` remains self-contained enough to run the skill without treating references as the main instruction body.
 - `COPLAN.md` and `COEXEC.md` remain user-facing graph docs, not agent-facing knowledge routes.
 - `.agents/knowledge/runtime.md` describes `flow_log.ndjson` structure and how to analyze root/CLI/subagent responsibility boundaries.
-- Root-facing `co flow` stdout docs stay focused on `contract_version`, `mode`, `phase`, and `root_action`, without internal scores, route or track metadata, progress snapshots, or allowlist fields.
+- Root-facing `co flow` stdout docs stay focused on `contract_version`, `mode`, `phase`, and `root_action`; errors use `root_action.type: report_error` instead of a top-level `ok` flag.

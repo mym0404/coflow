@@ -1,7 +1,7 @@
-# Coplan Runtime Graphs
+# Coplan 흐름도
 
-This document maps the runtime flow for `coplan`.
-The root agent must treat `co flow` stdout YAML as the control contract and only perform the returned `root_action`.
+이 문서는 `coplan`이 사용자 요청을 실행 가능한 plan bundle로 바꾸는 흐름을 보여주는 사용자용 문서다.
+그래프의 초점은 user, root agent, `co flow`, Codex CLI agent 사이에서 제어가 이동하는 방식이다.
 
 ## Sequence Diagram
 
@@ -12,32 +12,32 @@ sequenceDiagram
   participant Co as co flow
   participant Agent as Codex CLI agent
 
-  User->>Root: [유저] planning request
+  User->>Root: [유저] planning 요청
   Root->>Co: [추론기계] co flow init --plan-id ... --title ...
-  Co->>Co: [기계] create exec.yaml and initial bundle files
+  Co->>Co: [기계] exec.yaml과 초기 bundle file 생성
   Co-->>Root: [기계] root_action=continue_flow
 
-  loop until interview reaches a root boundary
+  loop root boundary에 도달할 때까지
     Root->>Co: [추론기계] co flow next or co flow respond --stdin
-    Co->>Co: [기계] read interview, status, and context
-    alt user answer is needed
+    Co->>Co: [기계] interview, status, context 읽기
+    alt 사용자 답변이 필요함
       Co-->>Root: [기계] root_action=ask_user
-      Root->>User: [추론기계] ask root_action.question exactly
-      User-->>Root: [유저] answer
+      Root->>User: [추론기계] root_action.question 전달
+      User-->>Root: [유저] 답변
       Root->>Co: [추론기계] co flow respond --stdin
-      Co->>Co: [기계] record answer and clear pending question
-    else internal step is possible
+      Co->>Co: [기계] 답변 기록과 pending question 해제
+    else 내부 진행 가능
       Co->>Agent: [기계] ask-next or ambiguity scorer
       Agent-->>Co: [추론형식] schema-bound JSON
-      Co->>Co: [기계] record fact, score ambiguity, or close interview gates
+      Co->>Co: [기계] fact 기록, ambiguity 계산, interview gate 처리
     end
   end
 
   Co->>Agent: [기계] bundle_author
   Agent-->>Co: [추론형식] draft.md, plan.yaml, tasks.yaml JSON
-  Co->>Co: [기계] write and validate bundle files
+  Co->>Co: [기계] bundle file 작성과 검증
 
-  loop until pre-draft review passes
+  loop pre-draft review가 통과할 때까지
     par contract review
       Co->>Agent: [기계] contract_reviewer
       Agent-->>Co: [추론형식] PASS or FAIL JSON
@@ -45,29 +45,29 @@ sequenceDiagram
       Co->>Agent: [기계] verification_reviewer
       Agent-->>Co: [추론형식] PASS or FAIL JSON
     end
-    alt any reviewer fails
+    alt reviewer 실패
       Co->>Agent: [기계] bundle_author with findings
       Agent-->>Co: [추론형식] revised bundle JSON
-      Co->>Co: [기계] rewrite and validate bundle files
-    else both reviewers pass
+      Co->>Co: [기계] bundle file 재작성과 검증
+    else reviewer 통과
       Co-->>Root: [기계] root_action=present_draft
     end
   end
 
-  Root->>User: [추론기계] present root_action.draft exactly
-  User-->>Root: [유저] approval or feedback
+  Root->>User: [추론기계] root_action.draft 표시
+  User-->>Root: [유저] 승인 또는 feedback
   Root->>Co: [추론기계] co flow respond --stdin
-  Co->>Agent: [기계] draft feedback classifier when needed
+  Co->>Agent: [기계] 필요한 경우 draft feedback 분류
   Agent-->>Co: [추론형식] approval, wording_change, or meaning_change JSON
   alt approval
-    Co->>Co: [기계] approve, finalize, start execution, claim task
+    Co->>Co: [기계] 승인, finalize, execution 준비, task claim
     Co-->>Root: [기계] root_action=execute_task
   else wording change
     Co->>Agent: [기계] bundle_author with wording feedback
-    Co->>Co: [기계] rerun validation and parallel review
+    Co->>Co: [기계] validation과 parallel review 재실행
     Co-->>Root: [기계] root_action=present_draft
   else meaning change
-    Co->>Co: [기계] reopen track, record feedback answer, rescore
+    Co->>Co: [기계] track 재개방, feedback 답변 기록, 재계산
     Co-->>Root: [기계] root_action=ask_user or present_draft
   end
 ```
@@ -76,101 +76,53 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-  Start(["[유저] planning request"])
-  Init["[추론기계] root runs co flow init"]
-  RootAction{"[기계] root_action.type"}
+  Start(["[유저] planning 요청"])
+  Init["[추론기계] co flow init"]
+  Iterate["[기계] interview 상태 진행"]
+  Boundary{"[기계] root boundary?"}
+  Question["[추론기계] 질문 전달"]
+  Answer["[유저] 답변 또는 수정"]
+  Draft["[추론형식] plan draft 생성"]
+  Review["[기계] 구조 검증과 review gate"]
+  DraftReady{"[기계] draft 표시 가능?"}
+  Repair["[추론형식] finding 반영"]
+  Present["[추론기계] draft 표시"]
+  Feedback{"[유저] 승인?"}
+  Meaning["[유저] 의미 변경 또는 누락 요구"]
+  Wording["[유저] 문구 수정"]
+  Finalize["[기계] bundle 승인과 execution 준비"]
+  Handoff(["[추론기계] execution 흐름으로 이동"])
 
-  Start --> Init --> RootAction
-
-  RootAction -->|continue_flow| Next["[추론기계] root runs co flow next"]
-  RootAction -->|ask_user| AskUser["[추론기계] ask root_action.question exactly"]
-  AskUser --> UserAnswer["[유저] answer"]
-  UserAnswer --> Respond["[추론기계] root pipes to co flow respond --stdin"]
-  RootAction -->|present_draft| PresentDraft["[추론기계] present root_action.draft exactly"]
-  PresentDraft --> UserFeedback["[유저] approval or feedback"]
-  UserFeedback --> Respond
-  RootAction -->|execute_task| ExecHandoff(["[추론기계] switch to coexec"])
-  RootAction -->|report_halt| Halt(["[추론기계] report halt"])
-  RootAction -->|report_complete| Complete(["[추론기계] report complete"])
-
-  Next --> Phase{"[기계] current phase"}
-  Respond --> Phase
-
-  Phase -->|drafting| IRead
-  Phase -->|draft_review| FClassify
-  Phase -->|planning or ready_for_exec| EStart
-
-  subgraph Interview
-    IRead["read interview/status/context"]
-    IPending{"pending user question?"}
-    IClosure{"closure gates pass?"}
-    IAskNext["[추론형식] ask-next agent"]
-    IScore["[추론형식] ambiguity scorer"]
-    IFact["record repo or research fact"]
-    IQuestion["create pending_user_question"]
-    IClose["close tracks and closure checks"]
-    IEmitAsk["emit root_action=ask_user"]
-
-    IRead --> IPending
-    IPending -->|yes| IEmitAsk
-    IPending -->|no| IClosure
-    IClosure -->|yes| IClose
-    IClosure -->|no| IAskNext
-    IAskNext -->|record_fact| IFact --> IScore --> IRead
-    IAskNext -->|ready_for_score| IScore --> IRead
-    IAskNext -->|ask_user| IQuestion --> IEmitAsk
-  end
-
-  IEmitAsk --> RootAction
-  IClose --> AAuthor
-
-  subgraph Author
-    AAuthor["[추론형식] bundle_author returns draft, plan, tasks"]
-    AValidate["[기계] validate bundle schema and gates"]
-    AReviewFork{{"[기계] run reviewers in parallel"}}
-    AContract["[추론형식] contract_reviewer"]
-    AVerification["[추론형식] verification_reviewer"]
-    AReviewJoin{{"[기계] join review results"}}
-    APass{"both reviewers PASS?"}
-    ARewrite["[기계] feed findings back to bundle_author"]
-    AEmitDraft["emit root_action=present_draft"]
-
-    AAuthor --> AValidate --> AReviewFork
-    AReviewFork --> AContract --> AReviewJoin
-    AReviewFork --> AVerification --> AReviewJoin
-    AReviewJoin --> APass
-    APass -->|no| ARewrite --> AAuthor
-    APass -->|yes| AEmitDraft
-  end
-
-  AEmitDraft --> RootAction
-
-  subgraph Feedback
-    FClassify{"[추론형식] approval, wording change, or meaning change?"}
-    FApprove["[기계] approve draft and finalize"]
-    FWording["[기계] rewrite wording through bundle_author"]
-    FMeaning["[기계] reopen affected interview track and record feedback"]
-    EStart["[기계] start execution and claim first ready task"]
-    FEmitExecute["emit root_action=execute_task"]
-
-    FClassify -->|approval| FApprove --> EStart
-    FClassify -->|wording_change| FWording --> AAuthor
-    FClassify -->|meaning_change| FMeaning --> IRead
-    EStart --> FEmitExecute
-  end
-
-  FEmitExecute --> RootAction
+  Start --> Init
+  Init --> Iterate
+  Iterate --> Boundary
+  Boundary -->|ask_user| Question
+  Question --> Answer
+  Answer --> Iterate
+  Boundary -->|draft possible| Draft
+  Draft --> Review
+  Review --> DraftReady
+  DraftReady -->|no| Repair
+  Repair --> Review
+  DraftReady -->|yes| Present
+  Present --> Feedback
+  Feedback -->|no, meaning change| Meaning
+  Meaning --> Iterate
+  Feedback -->|no, wording only| Wording
+  Wording --> Draft
+  Feedback -->|yes| Finalize
+  Finalize --> Handoff
 
   linkStyle default stroke:#616161,stroke-width:1.5px
-  linkStyle 0,4,7 stroke:#2e7d32,stroke-width:2px
-  linkStyle 2,3,5,6,8,9,10,11 stroke:#1565c0,stroke-width:2px
-  linkStyle 15,21,22,23,24,25,26,27,30,31,33,34,35,36,39,42,44,45,46 stroke:#f9a825,stroke-width:2px
+  linkStyle 0,4,12,13,14,15,16 stroke:#2e7d32,stroke-width:2px
+  linkStyle 1,3,10,11,17 stroke:#1565c0,stroke-width:2px
+  linkStyle 2,5,6,9 stroke:#f9a825,stroke-width:2px
 ```
 
 ## Label Meaning
 
-- `[기계]`: code-executed deterministic work such as file read/write, schema validation, state transition, subprocess launch, or stdout emission.
-- `[추론기계]`: root-agent action that calls `co flow` or transports exact user-visible content from `root_action`.
-- `[유저]`: user-authored request, answer, feedback, or approval.
-- `[추론형식]`: AI judgment constrained to a required output shape such as JSON schema.
-- Flowchart edge colors match the same roles: green for `[유저]`, blue for `[추론기계]`, gray for `[기계]`, and yellow for `[추론형식]`.
+- `[기계]`: file read/write, schema validation, state transition, subprocess launch, stdout emission처럼 코드로 실행되는 단계.
+- `[추론기계]`: root agent가 `co flow`를 호출하거나 `root_action`의 사용자 표시 내용을 전달하는 단계.
+- `[유저]`: 사용자가 작성한 요청, 답변, feedback, approval.
+- `[추론형식]`: JSON schema 같은 정해진 출력 형식 안에서 이뤄지는 AI 판단.
+- Flowchart edge 색상은 같은 역할을 따른다. green은 `[유저]`, blue는 `[추론기계]`, gray는 `[기계]`, yellow는 `[추론형식]`이다.

@@ -120,13 +120,9 @@ FLOW_ROOT_ACTION_TYPES = {
     "repair_task",
     "report_halt",
     "report_complete",
+    "report_error",
     "continue_flow",
 }
-FLOW_FORBIDDEN_ACTIONS = [
-    "call removed planner, exec, or note mutation commands",
-    "edit CLI-owned bundle files directly",
-    "choose the next workflow step without `co flow`",
-]
 FLOW_LOG_FILE = "flow_log.ndjson"
 CURRENT_FLOW_COMMAND = None
 
@@ -2834,13 +2830,11 @@ def flow_result(data, root_action, *, mode=None):
     if action_type not in FLOW_ROOT_ACTION_TYPES:
         raise ExError(f"unknown flow root action: {action_type}")
     result = {
-        "ok": data.get("ok", True),
         "contract_version": FLOW_CONTRACT_VERSION,
         "mode": mode or data.get("mode") or "unknown",
     }
-    for key, value in data.items():
-        if key not in {"ok", "mode"}:
-            result[key] = value
+    if data.get("phase") is not None:
+        result["phase"] = data["phase"]
     result["root_action"] = root_action
     return result
 
@@ -2852,6 +2846,7 @@ def print_flow_result(data, root_action, *, mode=None):
         mode=mode,
     )
     plan_dir = active_plan_dir_or_none()
+    command_ok = result.get("mode") != "error" and data.get("ok", True) is not False
     append_flow_log(
         plan_dir,
         "root_action.emit",
@@ -2863,7 +2858,7 @@ def print_flow_result(data, root_action, *, mode=None):
         plan_dir,
         "flow.command.end",
         command=CURRENT_FLOW_COMMAND,
-        ok=result.get("ok"),
+        ok=command_ok,
         phase_after=current_phase_or_none(plan_dir) if plan_dir else None,
         root_action=root_action.get("type"),
         mode=result.get("mode"),
@@ -2871,13 +2866,19 @@ def print_flow_result(data, root_action, *, mode=None):
     print_yaml(result)
 
 
+def flow_error_data():
+    data = {"ok": False}
+    plan_dir = active_plan_dir_or_none()
+    phase = current_phase_or_none(plan_dir) if plan_dir else None
+    if phase:
+        data["phase"] = phase
+    return data
+
+
 def print_flow_error(message):
     print_flow_result(
-        {"ok": False, "error": message},
-        {
-            "type": "continue_flow",
-            "message": "Fix the reported input or state issue, then rerun the appropriate `co flow` command.",
-        },
+        flow_error_data(),
+        report_error_action(message),
         mode="error",
     )
 
@@ -2888,6 +2889,13 @@ def active_plan_summary(bundle):
 
 def continue_flow_action(message):
     return {"type": "continue_flow", "message": message, "next_command": "co flow next"}
+
+
+def report_error_action(message):
+    return {
+        "type": "report_error",
+        "message": message,
+    }
 
 
 def ask_user_action(pending):
@@ -3921,9 +3929,6 @@ def print_flow_boundary(result):
     data = {
         "phase": bundle["status"].get("phase"),
     }
-    for key, value in result.items():
-        if key != "root_action":
-            data[key] = value
     print_flow_result(data, action, mode=flow_mode_from_phase(bundle["status"].get("phase")))
 
 
@@ -4170,8 +4175,8 @@ def main(argv=None):
         if getattr(args, "command", None) == "flow":
             log_flow_command_error(str(exc))
             print_flow_result(
-                data,
-                continue_flow_action("Fix the reported flow state, then rerun `co flow next`."),
+                flow_error_data(),
+                report_error_action(str(exc)),
                 mode="error",
             )
         else:
@@ -4182,7 +4187,6 @@ def main(argv=None):
             log_flow_command_error(str(exc))
             print_flow_error(str(exc))
             return 1
-        sys.stdout.write("ok: false\n")
         sys.stdout.write("error: " + repr(str(exc)) + "\n")
         sys.stdout.write(
             "required_action: 'Read error, satisfy the blocked gate or fix command input, then rerun the appropriate co command.'\n"

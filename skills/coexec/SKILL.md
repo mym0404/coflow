@@ -12,7 +12,7 @@ description: active plan bundle의 current task를 `co flow`로 실행하는 roo
 ## 핵심 계약
 
 - 실행 시작과 재개는 `co flow next`로 한다.
-- 모든 `co flow` 응답은 YAML이며 `ok`, `contract_version`, `mode`, `phase`, `root_action`을 확인한다.
+- 모든 `co flow` 응답은 YAML이며 `contract_version`, `mode`, `phase`, `root_action`을 확인한다.
 - Root agent는 `root_action.task`에 있는 current task만 구현한다.
 - 검증 명령은 root agent가 실제 shell에서 실행한다.
 - 검증 output, exit code, success 여부는 `co flow evidence`로 기록한다.
@@ -22,19 +22,58 @@ description: active plan bundle의 current task를 `co flow`로 실행하는 roo
 
 ## Flow Stdout
 
-`co flow`는 아래 핵심 필드를 포함한 YAML을 반환한다.
+`co flow`는 root agent가 처리해야 할 정보만 YAML로 반환한다.
 
 ```yaml
-ok: true
 contract_version: '1'
 mode: planner|executor|halted|complete|error
 phase: executing
 root_action:
-  type: continue_flow|execute_task|repair_task|report_halt|report_complete
+  type: continue_flow|execute_task|repair_task|report_halt|report_complete|report_error
 ```
 
-`ok: false`이면 `error`와 `root_action`을 함께 보고 다음 행동을 정한다.
-`ok: true`이면 `root_action.type`에 맞는 행동 하나만 수행한다.
+`phase`는 active plan 상태다.
+에러도 `mode: error`와 `root_action.type: report_error`로 표현된다.
+항상 `root_action.type`에 맞는 행동 하나만 수행한다.
+
+Executor에서 주로 받는 `root_action` 모양은 아래와 같다.
+
+```yaml
+root_action:
+  type: execute_task|repair_task
+  active_plan:
+    id: plan-id
+  task:
+    id: task-id
+    title: task title
+  status:
+    id: task-id
+    status: Doing
+  task_view:
+    files:
+      - path/to/file
+    verification:
+      - id: verification-step-id
+        command: verification command
+        success_signal: expected signal
+    acceptance_criteria:
+      - expected behavior
+  evidence_state:
+    required:
+      - evidence artifact path
+    recorded:
+      - evidence artifact path
+  notes: []
+  latest_failed_evidence: {}
+```
+
+`latest_failed_evidence`는 실패 evidence가 있을 때만 온다.
+
+```yaml
+root_action:
+  type: report_error
+  message: CLI가 보고한 에러 내용
+```
 
 ## 시작
 
@@ -53,6 +92,7 @@ root_action:
 | `repair_task` | 현재 task 범위 안에서 실패 원인을 고치고 verification을 다시 실행한다. |
 | `report_halt` | `root_action.halt`를 사용자에게 보고하고 멈춘다. |
 | `report_complete` | 최종 완료를 보고한다. |
+| `report_error` | `root_action.message`를 사용자에게 보고하고 멈춘다. |
 
 ## Execution Workflow
 
@@ -75,18 +115,26 @@ co flow evidence
 
 ## Evidence 기록
 
-Verification output은 아래 형태로 기록한다.
+Verification은 `root_action.task_view.verification[*]`에 있는 step을 기준으로 실행한다.
+`--step`에는 실행한 verification item의 `id`를 넣는다.
+`--command`에는 실제 실행한 shell command를 그대로 넣는다.
+`--success true`는 exit code와 output이 해당 step의 `success_signal`을 만족할 때만 쓴다.
+
+Exit code를 잃지 않도록 output과 code를 먼저 잡은 뒤 evidence로 넘긴다.
 
 ```bash
-<command> 2>&1 | ~/.codex/skills/coplan/scripts/co flow evidence \
-  --step <step-id> \
-  --command "<command>" \
-  --exit-code <code> \
+set +e
+command='<verification command from root_action.task_view.verification[*].command>'
+output="$(sh -lc "$command" 2>&1)"
+code=$?
+printf '%s\n' "$output" | ~/.codex/skills/coplan/scripts/co flow evidence \
+  --step <verification-step-id> \
+  --command "$command" \
+  --exit-code "$code" \
   --success true|false \
   --stdin
 ```
 
-`--success true`는 검증 명령이 task의 성공 신호를 만족했다는 뜻이다.
 `--success false`는 실패 output을 기록하고 `repair_task` 경계로 돌아가야 한다는 뜻이다.
 
 ## Repair와 Halt

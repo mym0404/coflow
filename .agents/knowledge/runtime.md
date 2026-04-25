@@ -54,8 +54,8 @@ Keep user-facing graphs and root-agent skill prompts synchronized with runtime b
 - `skills/*/references/` is not used.
 - Project maintenance references must live under `.agents/knowledge/`, not under `skills/*/references/`.
 - Skill prompts should use concise tables, root action contracts, and execution loops instead of Mermaid diagrams.
-- When changing planner or executor state transitions, root actions, interview loops, review loops, draft feedback handling, evidence handling, repair, halt, or finish behavior, update the relevant user-facing graph doc and the relevant `SKILL.md` in the same change.
-- Planner parallel reviewer execution must stay visible in `COPLAN.md` and `skills/coplan/SKILL.md`; executor single-current-task execution must stay visible in `COEXEC.md` and `skills/coexec/SKILL.md`.
+- When changing planner or executor state transitions, root actions, user boundaries, evidence handling, repair, halt, or finish behavior, update the relevant user-facing graph doc and the relevant `SKILL.md` in the same change.
+- User-facing graph docs can show CLI and subagent detail; `SKILL.md` should keep only the workflow knowledge the root agent needs to run the skill.
 
 ## Flow Log
 
@@ -96,7 +96,7 @@ Core flow:
 - continue with `skills/coplan/scripts/co flow next`.
 - ask exact `root_action.question` values and pipe answers to `co flow respond --stdin`.
 - present exact `root_action.draft` values and pipe approval or feedback to `co flow respond --stdin`.
-- switch to `coexec` when `root_action.type` becomes `execute_task`, `repair_task`, `report_halt`, or `report_complete`.
+- switch to `coexec` when `root_action.type` becomes `execute_task` or `repair_task`; report and stop on `report_halt`, `report_complete`, or `report_error`.
 
 The root agent does not directly edit bundle files.
 CLI-owned files include `draft.md`, `plan.yaml`, `tasks.yaml`, `planning_context.yaml`, `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml`.
@@ -113,6 +113,7 @@ Core flow:
 - repair only task envelope fields with `co flow repair`.
 - halt only through `co flow halt`.
 - report completion only after `root_action.type: report_complete`.
+- report CLI errors only through `root_action.type: report_error`.
 
 Executor work must not redesign the approved plan contract.
 If a needed change would alter user-visible behavior, acceptance criteria, task order, dependencies, or non-goals, halt through `co flow halt`.
