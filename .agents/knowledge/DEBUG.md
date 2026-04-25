@@ -121,7 +121,6 @@ Check:
 - `interview.yaml.seed_review.status` reaches `approved` before `status.yaml.phase` reaches `ready_for_exec`.
 - `tasks.yaml` has no task status fields.
 - `tasks.yaml` contains at least one `kind: final_verification` task.
-- `interview.yaml.seed_review.fingerprint` is fresh for the current plan seed and task bundle.
 
 Likely problems:
 
@@ -129,8 +128,8 @@ Likely problems:
 |---|---|
 | Stuck asking questions | Pending user question, interview track pressure, closure audit blocker, latest `interview.*` events. |
 | Plan seed shown too early | Closure checks, ambiguity freshness, `state.transition` into `seed_review`. |
-| Feedback changed meaning silently | `seed_feedback.classified`, reopened interview state, seed review fingerprint. |
-| Execution started too early | `seed_review.status`, seed review fingerprint, transition to `ready_for_exec`. |
+| Feedback changed meaning silently | `seed_feedback.classified`, reopened interview state. |
+| Execution started too early | `seed_review.status`, transition to `ready_for_exec`. |
 
 ## Executor Debugging
 

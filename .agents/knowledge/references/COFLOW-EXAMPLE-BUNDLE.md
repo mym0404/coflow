@@ -254,7 +254,7 @@ closure_audit:
   score_id: S2
 seed_review:
   status: approved
-  fingerprint: <sha256>
+  fingerprint: null
   comment: Plan seed approved.
   feedback: []
 closure:

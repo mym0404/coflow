@@ -111,7 +111,7 @@ Valid routes:
 Required review state fields under `seed_review`:
 
 - `status`: `not_presented`, `presented`, or `approved`
-- `fingerprint`
+- `fingerprint`: compatibility field, currently `null`
 - `comment`
 - `feedback`
 

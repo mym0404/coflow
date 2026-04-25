@@ -22,7 +22,6 @@ A bundle is planner-ready only when:
 - `status.yaml` task ids match `tasks.yaml` task ids.
 - `status.yaml.bundle_inspection.author` records grounded bundle-author repo inspection.
 - `interview.yaml.seed_review.status` reaches `approved`.
-- `interview.yaml.seed_review.fingerprint` matches current `plan_seed.yaml`, `tasks.yaml`, and the semantic interview contract.
 - `notes.yaml` and `evidence.yaml` are present and CLI-managed.
 - `status.yaml.phase` reaches `ready_for_exec`.
 
@@ -54,8 +53,6 @@ A bundle is planner-ready only when:
 - `bundle_author` runs after `plan_seed.yaml` is current for the closed interview.
 - `bundle_author` writes `tasks.yaml` content only through the CLI.
 - Local schema validation must pass before the plan seed is presented.
-- Passing validation stores a seed review fingerprint over `plan_seed.yaml`, `tasks.yaml`, and the semantic interview contract.
-- If those inputs change after presentation, `co.py flow` regenerates or revalidates the bundle before approval.
 
 ## Execution Gate
 

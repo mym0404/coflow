@@ -385,28 +385,6 @@ def file_content_hash(path_value):
     }
 
 
-def source_refs_fingerprint_payload(source_refs):
-    payload = []
-    for ref in source_refs or []:
-        if not isinstance(ref, dict):
-            continue
-        path_value = ref.get("path")
-        line = ref.get("line")
-        if not isinstance(path_value, str) or not isinstance(line, int):
-            continue
-        path = Path(path_value)
-        line_hash = source_line_hash(path, line) if path.is_file() and line >= 1 else None
-        payload.append(
-            {
-                "path": path_value,
-                "line": line,
-                "claim": ref.get("claim"),
-                "line_hash": line_hash,
-            }
-        )
-    return payload
-
-
 def repo_inspection_fingerprint_payload(repo_inspection):
     if not isinstance(repo_inspection, dict):
         return repo_inspection
@@ -1424,46 +1402,8 @@ def reset_authored_bundle(plan_dir):
     write_yaml(plan_dir / "status.yaml", status)
 
 
-def interview_code_fact_source_refs(interview):
-    refs = []
-    for round_item in interview.get("rounds", []):
-        if isinstance(round_item, dict) and round_item.get("route") == "code_fact":
-            refs.extend(round_item.get("source_refs", []))
-    return refs
-
-
 def default_bundle_inspection():
     return {"author": None}
-
-
-def current_bundle_inspection(plan_dir, override=None):
-    if override is not None:
-        return override
-    try:
-        status = load_yaml(plan_dir / "status.yaml")
-        return status.get("bundle_inspection", default_bundle_inspection())
-    except ExError:
-        return default_bundle_inspection()
-
-
-def plan_bundle_fingerprint(plan_dir, bundle_inspection=None):
-    interview = load_yaml(plan_dir / "interview.yaml")
-    repo_context_pack = build_repo_context_pack()
-    inspection_payload = repo_inspection_fingerprint_payload(
-        current_bundle_inspection(plan_dir, bundle_inspection)
-    )
-    payload = {
-        "tasks": load_yaml(plan_dir / "tasks.yaml"),
-        "interview_contract": interview_contract_payload(interview),
-        "plan_seed": load_plan_seed(plan_dir) if (plan_dir / "plan_seed.yaml").exists() else None,
-        "repo_context_pack_hash": hash_text(dump_json(repo_context_pack)),
-        "repo_inspection_hash": hash_text(dump_json(inspection_payload)),
-        "code_fact_source_refs": source_refs_fingerprint_payload(
-            interview_code_fact_source_refs(interview)
-        ),
-    }
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def interview_contract_payload(interview):
@@ -1561,13 +1501,11 @@ def plan_seed_is_current(plan_dir, interview=None):
     )
 
 
-def require_presented_seed_current(plan_dir, action):
+def require_presented_seed_review(plan_dir, action):
     interview = load_yaml(plan_dir / "interview.yaml")
     seed_review = interview.get("seed_review", {})
     if seed_review.get("status") not in {"presented", "approved"}:
         raise ExError(f"{action} requires presented plan seed")
-    if seed_review.get("fingerprint") != plan_bundle_fingerprint(plan_dir):
-        raise ExError(f"{action} requires current plan seed bundle")
 
 
 def reset_seed_review_state(plan_dir, preserve_feedback=False):
@@ -1590,7 +1528,7 @@ def mark_seed_review_presented(plan_dir):
     interview = load_yaml(plan_dir / "interview.yaml")
     seed_review = interview.setdefault("seed_review", {})
     seed_review["status"] = "presented"
-    seed_review["fingerprint"] = plan_bundle_fingerprint(plan_dir)
+    seed_review["fingerprint"] = None
     seed_review.setdefault("comment", "")
     seed_review.setdefault("feedback", [])
     validate_interview(interview)
@@ -1601,7 +1539,7 @@ def mark_seed_review_approved(plan_dir, comment):
     interview = load_yaml(plan_dir / "interview.yaml")
     seed_review = interview.setdefault("seed_review", {})
     seed_review["status"] = "approved"
-    seed_review["fingerprint"] = plan_bundle_fingerprint(plan_dir)
+    seed_review["fingerprint"] = None
     seed_review["comment"] = comment or "Plan seed approved."
     seed_review.setdefault("feedback", [])
     validate_interview(interview)
@@ -1621,7 +1559,7 @@ def append_seed_review_feedback(plan_dir, feedback, classification):
         }
     )
     seed_review["status"] = "presented"
-    seed_review["fingerprint"] = plan_bundle_fingerprint(plan_dir)
+    seed_review["fingerprint"] = None
     seed_review.setdefault("comment", "")
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
@@ -2815,7 +2753,7 @@ def approve_and_finalize(plan_dir, comment):
     status = load_yaml(plan_dir / "status.yaml")
     if status.get("phase") != "seed_review":
         raise ExError("plan seed approval requires seed_review phase")
-    require_presented_seed_current(plan_dir, "plan seed approval")
+    require_presented_seed_review(plan_dir, "plan seed approval")
     previous_phase = status.get("phase")
     status["phase"] = "ready_for_exec"
     validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
@@ -2842,7 +2780,7 @@ def approve_and_finalize(plan_dir, comment):
     status = load_yaml(plan_dir / "status.yaml")
     validate_tasks(tasks)
     validate_status(status, tasks)
-    require_presented_seed_current(plan_dir, "flow finalize")
+    require_presented_seed_review(plan_dir, "flow finalize")
 
 
 def classify_seed_feedback(plan_dir, feedback):

@@ -119,13 +119,10 @@ Full credit requires:
 - The root agent presents the plan seed without summarizing, rewriting, or deciding approval.
 - User approval is recorded explicitly before `ready_for_exec`.
 - User feedback is classified before mutation, with wording-only changes revised directly and semantic changes routed back through interview.
-- Bundle freshness is tied to the current plan seed, tasks, and semantic interview contract.
-
 High-risk failures:
 
 - Root agent approval or summarization replaces user seed review.
 - Feedback can silently mutate the approved contract without reopening the right planning gate.
-- Tasks remain executable after plan seed or interview contract drift without a fresh bundle fingerprint.
 
 ### C4 Role Philosophy
 
