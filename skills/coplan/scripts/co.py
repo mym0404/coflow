@@ -649,20 +649,6 @@ def active_plan():
     return str(plan_id), Path(str(plan_dir))
 
 
-def file_path(plan_dir, name):
-    mapping = {
-        "tasks": "tasks.yaml",
-        "plan-seed": "plan_seed.yaml",
-        "interview": "interview.yaml",
-        "status": "status.yaml",
-        "notes": "notes.yaml",
-        "evidence": "evidence.yaml",
-    }
-    if name not in mapping:
-        raise ExError(f"unknown file: {name}")
-    return plan_dir / mapping[name]
-
-
 def read_text_file(path):
     try:
         return path.read_text()
@@ -1750,49 +1736,6 @@ def required_evidence_missing(bundle, task):
     return missing
 
 
-def command_current(_args):
-    plan_id, plan_dir = active_plan()
-    print_yaml(
-        result_with_required_action(
-            {"active_plan_id": plan_id, "plan_dir": str(plan_dir)},
-            "Use active_plan_id and plan_dir as the current bundle pointer, then continue the relevant planner or executor flow.",
-        )
-    )
-
-
-def command_show(args):
-    _, plan_dir = active_plan()
-    print_yaml(load_yaml(file_path(plan_dir, args.file)))
-
-
-def command_review_context(_args):
-    bundle = load_bundle()
-    title = bundle["plan_seed"]["seed"]["title"] if bundle.get("plan_seed") else bundle["plan_id"]
-    data = {
-        "active_plan": {"id": bundle["plan_id"], "dir": str(bundle["plan_dir"])},
-        "plan_seed": bundle["plan_seed"],
-        "tasks": bundle["tasks"],
-        "context_pack": build_planning_context(bundle["plan_id"], bundle["plan_dir"], title, bundle["interview"]),
-        "interview": bundle["interview"],
-        "status": bundle["status"],
-        "notes": bundle["notes"],
-        "evidence": bundle["evidence"],
-    }
-    try:
-        data["git"] = {
-            "log_oneline_5": run_git(["log", "--oneline", "-5"]),
-            "status_short": run_git(["status", "--short"]),
-            "diff_stat": run_git(["diff", "--stat"]),
-        }
-    except Exception as exc:
-        data["git_error"] = str(exc)
-    print_yaml(data)
-
-
-def run_git(args):
-    return subprocess.run(["git", *args], check=False, text=True, capture_output=True).stdout.splitlines()
-
-
 def agent_context(plan_dir):
     plan_seed_path = plan_dir / "plan_seed.yaml"
     plan_id, _ = active_plan()
@@ -2391,14 +2334,12 @@ def task_root_action(bundle, action_type):
     return action
 
 
-def init_plan(plan_id, title, replace=False, initial_context=""):
+def init_plan(plan_id, title, initial_context=""):
     require_yaml()
     validate_plan_id(plan_id)
     plan_dir = PLAN_ROOT / plan_id
     if plan_dir.exists():
-        if not replace:
-            raise ExError(f"{plan_dir} already exists; use --replace to recreate it")
-        shutil.rmtree(plan_dir)
+        raise ExError(f"{plan_dir} already exists; choose a new plan id")
     (plan_dir / "evidence").mkdir(parents=True, exist_ok=True)
     PLAN_ROOT.mkdir(parents=True, exist_ok=True)
     write_yaml(EXEC_FILE, {"active_plan_id": plan_id, "plan_dir": str(plan_dir)})
@@ -3677,10 +3618,12 @@ def print_flow_boundary(result):
 
 
 def flow_init(args):
-    initial_context = args.prompt if args.prompt is not None else read_stdin().strip()
+    if not args.stdin:
+        raise ExError("flow init requires --stdin")
+    initial_context = read_stdin().strip()
     if not initial_context:
-        raise ExError("flow init requires a non-empty --prompt or --stdin body")
-    plan_dir = init_plan(args.plan_id, args.title, args.replace, initial_context)
+        raise ExError("flow init requires a non-empty stdin body")
+    plan_dir = init_plan(args.plan_id, args.title, initial_context)
     log_flow_command_start(
         plan_dir,
         CURRENT_FLOW_COMMAND or "flow init",
@@ -3838,37 +3781,13 @@ def build_parser():
     parser = argparse.ArgumentParser(prog=CLI_COMMAND_NAME)
     sub = parser.add_subparsers(dest="command", required=True)
 
-    current = sub.add_parser("current")
-    current.set_defaults(func=command_current)
-
-    show = sub.add_parser("show")
-    show.add_argument(
-        "--file",
-        required=True,
-        choices=[
-            "tasks",
-            "plan-seed",
-            "interview",
-            "status",
-            "notes",
-            "evidence",
-        ],
-    )
-    show.set_defaults(func=command_show)
-
-    review_context = sub.add_parser("review-context")
-    review_context.set_defaults(func=command_review_context)
-
     flow = sub.add_parser("flow")
     flow_sub = flow.add_subparsers(dest="flow_command", required=True)
 
     flow_init_parser = flow_sub.add_parser("init")
     flow_init_parser.add_argument("--plan-id", required=True)
     flow_init_parser.add_argument("--title", required=True)
-    init_input = flow_init_parser.add_mutually_exclusive_group(required=True)
-    init_input.add_argument("--prompt")
-    init_input.add_argument("--stdin", action="store_true")
-    flow_init_parser.add_argument("--replace", action="store_true")
+    flow_init_parser.add_argument("--stdin", action="store_true", required=True)
     flow_init_parser.set_defaults(func=flow_init)
 
     flow_next_parser = flow_sub.add_parser("next")

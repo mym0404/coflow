@@ -97,7 +97,7 @@ Use `skills/coplan/SKILL.md` as the planner entrypoint.
 
 Core flow:
 
-- initialize with `skills/coplan/scripts/co.py flow init --plan-id <id> --title "<title>" --stdin` or `--prompt "<request>"`.
+- initialize with `skills/coplan/scripts/co.py flow init --plan-id <id> --title "<title>" --stdin`.
 - let `flow init`, `flow respond`, and `flow evidence` advance internally until the next root boundary.
 - use `skills/coplan/scripts/co.py flow next` to resume an active bundle and ask the CLI for the next root boundary.
 - ask exact `root_action.question` values and pipe answers to `co.py flow respond --stdin`.

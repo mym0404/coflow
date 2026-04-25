@@ -25,21 +25,18 @@ This is a CLI maintenance reference, not default root-agent context.
 Mutation:
 
 ```bash
-co.py flow init --plan-id <id> --title "<title>" (--prompt "<request>" | --stdin) [--replace]
+co.py flow init --plan-id <id> --title "<title>" --stdin
 co.py flow next
 co.py flow respond --stdin
 co.py flow evidence --step <step-id> --command "<command>" --exit-code <code> --success true|false --stdin
 co.py flow repair --field <path> --reason "<reason>" --set|--add|--remove <yaml-value>
 co.py flow halt --kind user_decision|external_environment --reason "<reason>"
-co.py flow status
 ```
 
-Read-only and diagnostics:
+Read-only diagnostics:
 
 ```bash
-co.py current
-co.py show --file tasks|plan-seed|interview|status|notes|evidence
-co.py review-context
+co.py flow status
 ```
 
 ## `plan_seed.yaml`

@@ -201,17 +201,10 @@ Planning이 끝나면 `mode: executor`가 반환되고, root agent는 `coexec`�
 Planning 중 사용하는 flow command는 아래뿐이다.
 
 ```bash
-printf '%s\n' "<사용자 요청 원문>" | ~/.codex/skills/coplan/scripts/co.py flow init --plan-id <id> --title "<title>" --stdin [--replace]
+printf '%s\n' "<사용자 요청 원문>" | ~/.codex/skills/coplan/scripts/co.py flow init --plan-id <id> --title "<title>" --stdin
 ~/.codex/skills/coplan/scripts/co.py flow next
 ~/.codex/skills/coplan/scripts/co.py flow respond --stdin
 ~/.codex/skills/coplan/scripts/co.py flow status
-```
-
-필요하면 read-only command는 사용할 수 있다.
-
-```bash
-~/.codex/skills/coplan/scripts/co.py current
-~/.codex/skills/coplan/scripts/co.py show --file tasks|plan-seed|interview|status|notes|evidence
 ```
 
 ## 금지 사항
@@ -224,6 +217,6 @@ printf '%s\n' "<사용자 요청 원문>" | ~/.codex/skills/coplan/scripts/co.py
 
 ## 보고 기준
 
-- 현재 plan이 생겼으면 `co.py current` 기준으로 active plan을 보고한다.
+- 현재 plan이 생겼으면 `root_action.active_plan` 또는 `co.py flow status` 기준으로 active plan을 보고한다.
 - 사용자 입력이 필요한 상태면 질문 또는 plan seed만 보여준다.
 - 중간에 멈추면 `report_error` 내용을 그대로 설명한다.
