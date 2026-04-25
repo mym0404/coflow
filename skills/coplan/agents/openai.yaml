@@ -1,0 +1,6 @@
+interface:
+  display_name: "Coplan"
+  short_description: "모호한 요청을 실행 가능한 계획 번들로 정리"
+
+policy:
+  allow_implicit_invocation: false

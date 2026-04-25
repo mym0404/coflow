@@ -1,0 +1,2685 @@
+#!/usr/bin/env python3
+import argparse
+import concurrent.futures
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+PLAN_ROOT = Path(".agents/plan")
+EXEC_FILE = PLAN_ROOT / "exec.yaml"
+BOOTSTRAP_DIR = Path.home() / ".cache" / "codex-co"
+BOOTSTRAP_VENV = BOOTSTRAP_DIR / "venv"
+BOOTSTRAP_PYTHON = BOOTSTRAP_VENV / "bin" / "python"
+VALID_PHASES = {
+    "drafting",
+    "draft_review",
+    "planning",
+    "ready_for_exec",
+    "executing",
+    "halted",
+    "complete",
+}
+TASK_STATES = {"Todo", "Doing", "Done"}
+REVIEW_STATUSES = {"not_run", "passed", "failed"}
+REVIEW_STAGES = {"pre-draft"}
+REQUIRED_REVIEWERS = ("contract_reviewer", "verification_reviewer")
+INTERVIEW_STATUSES = {"open", "closed"}
+INTERVIEW_TRACK_STATUSES = {"open", "closed"}
+INTERVIEW_ROUTES = {"code_fact", "user_decision", "code_plus_decision", "research_confirmation"}
+INTERVIEW_REQUIRED_TRACKS = (
+    "scope",
+    "non_goals",
+    "outputs",
+    "verification",
+    "constraints",
+    "stop_conditions",
+)
+INTERVIEW_REQUIRED_TRACK_SET = set(INTERVIEW_REQUIRED_TRACKS)
+INTERVIEW_REQUIRED_USER_TRACKS = ("scope", "outputs", "verification")
+INTERVIEW_NON_USER_ROUTES = {"code_fact", "research_confirmation"}
+INTERVIEW_USER_ROUTES = {"user_decision", "code_plus_decision"}
+INTERVIEW_NON_USER_STREAK_LIMIT = 3
+INTERVIEW_TRACK_FOCUS_LIMIT = 3
+INTERVIEW_MIN_TOTAL_ROUNDS = len(INTERVIEW_REQUIRED_TRACKS)
+INTERVIEW_MIN_USER_ROUNDS = len(INTERVIEW_REQUIRED_USER_TRACKS)
+INTERVIEW_CLOSURE_CHECKS = (
+    "desired_output_explicit",
+    "user_tradeoffs_explicit",
+    "executor_determinism",
+    "verification_proves_behavior",
+    "no_material_questions",
+)
+INTERVIEW_SOURCE_PREFIXES = {
+    "code_fact": ("from-code",),
+    "research_confirmation": ("from-research",),
+    "user_decision": ("from-user",),
+    "code_plus_decision": ("from-user",),
+}
+AMBIGUITY_THRESHOLD = 0.2
+AMBIGUITY_SCORING_TEMPERATURE_INTENT = 0.1
+AMBIGUITY_WEIGHTS = {
+    "greenfield": {
+        "goal_clarity": 0.40,
+        "constraint_clarity": 0.30,
+        "success_criteria_clarity": 0.30,
+    },
+    "brownfield": {
+        "goal_clarity": 0.35,
+        "constraint_clarity": 0.25,
+        "success_criteria_clarity": 0.25,
+        "context_clarity": 0.15,
+    },
+}
+AMBIGUITY_FLOORS = {
+    "goal_clarity": 0.75,
+    "constraint_clarity": 0.65,
+    "success_criteria_clarity": 0.70,
+    "context_clarity": 0.60,
+}
+CODEX_AGENT_DEFAULT_MODEL = "gpt-5.5"
+CODEX_AGENT_DEFAULT_SANDBOX = "read-only"
+CODEX_AGENT_DEFAULT_TIMEOUT_SECONDS = 600
+CODEX_AGENT_STRIP_ENV_KEYS = {
+    "OUROBOROS_AGENT_RUNTIME",
+    "OUROBOROS_LLM_BACKEND",
+    "CODEX_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "CODEX_PARENT_AGENT_ID",
+    "CODEX_EXECUTION_ID",
+}
+NOTE_KINDS = {"discovery", "decision", "risk", "revision", "repair", "halt"}
+EVENT_KINDS = {
+    "plan_initialized",
+    "phase_changed",
+    "codex_agent_ran",
+    "interview_recorded",
+    "interview_question_asked",
+    "interview_track_changed",
+    "interview_closed",
+    "interview_closure_checked",
+    "interview_blocker_changed",
+    "interview_scored",
+    "skeleton_generated",
+    "draft_approved",
+    "bundle_finalized",
+    "planner_review_recorded",
+    "planner_review_passed",
+    "task_claimed",
+    "task_completed",
+    "task_repaired",
+    "task_halted",
+    "evidence_recorded",
+}
+CONTRACT_REPAIR_ROOTS = {"files", "implementation_notes", "verification"}
+DRAFT_PLACEHOLDER_MARKER = "<!-- EX_DRAFT_PLACEHOLDER -->"
+DRAFT_APPROVED_PHASES = {
+    "planning",
+    "ready_for_exec",
+    "executing",
+    "halted",
+    "complete",
+}
+
+
+class ExError(Exception):
+    pass
+
+
+def require_yaml():
+    try:
+        import yaml  # type: ignore
+    except Exception as exc:
+        bootstrap_pyyaml(exc)
+        raise ExError("PyYAML bootstrap did not restart co") from exc
+    return yaml
+
+
+def bootstrap_pyyaml(original_exc):
+    if os.environ.get("EX_BOOTSTRAPPED") == "1":
+        raise ExError(
+            "PyYAML is required but bootstrap failed. Run `co doctor` for details."
+        ) from original_exc
+    try:
+        BOOTSTRAP_DIR.mkdir(parents=True, exist_ok=True)
+        if BOOTSTRAP_PYTHON.exists() and python_can_import_yaml(BOOTSTRAP_PYTHON):
+            reexec_with_bootstrap_python()
+        if not BOOTSTRAP_PYTHON.exists():
+            subprocess.run(
+                [sys.executable, "-m", "venv", str(BOOTSTRAP_VENV)],
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+        subprocess.run(
+            [str(BOOTSTRAP_PYTHON), "-m", "pip", "install", "--upgrade", "pip", "PyYAML"],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+    except Exception as exc:
+        raise ExError(
+            "PyYAML bootstrap failed. Run `co doctor` for details. "
+            f"Original import error: {original_exc}"
+        ) from exc
+    reexec_with_bootstrap_python()
+
+
+def reexec_with_bootstrap_python():
+    env = os.environ.copy()
+    env["EX_BOOTSTRAPPED"] = "1"
+    os.execvpe(str(BOOTSTRAP_PYTHON), [str(BOOTSTRAP_PYTHON), str(Path(__file__).resolve()), *sys.argv[1:]], env)
+
+
+def python_can_import_yaml(python):
+    if not Path(python).exists():
+        return False
+    result = subprocess.run(
+        [str(python), "-c", "import yaml; print(yaml.__version__)"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def read_stdin():
+    return sys.stdin.read()
+
+
+def load_yaml(path):
+    yaml = require_yaml()
+    if not path.exists():
+        raise ExError(f"missing file: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle)
+    return data if data is not None else {}
+
+
+def dump_yaml(data):
+    yaml = require_yaml()
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+def write_yaml(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = dump_yaml(data)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def print_yaml(data):
+    sys.stdout.write(dump_yaml(data))
+
+
+def result_with_required_action(data, required_action, next_command=None):
+    result = {"ok": data.get("ok", True)}
+    for key, value in data.items():
+        if key != "ok":
+            result[key] = value
+    result["required_action"] = required_action
+    if next_command:
+        result["next_command"] = next_command
+    return result
+
+
+def print_result(data, required_action, next_command=None):
+    print_yaml(result_with_required_action(data, required_action, next_command))
+
+
+def print_simple_yaml(data):
+    for key, value in data.items():
+        if value is True:
+            rendered = "true"
+        elif value is False:
+            rendered = "false"
+        elif value is None:
+            rendered = "null"
+        else:
+            rendered = repr(str(value))
+        sys.stdout.write(f"{key}: {rendered}\n")
+
+
+def dump_json(data):
+    return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False)
+
+
+def build_codex_child_env():
+    env = os.environ.copy()
+    for key in CODEX_AGENT_STRIP_ENV_KEYS:
+        env.pop(key, None)
+    return env
+
+
+def write_output_schema_tempfile(schema):
+    handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
+    try:
+        json.dump(schema, handle, ensure_ascii=False)
+        handle.flush()
+        return Path(handle.name)
+    finally:
+        handle.close()
+
+
+def build_codex_exec_command(
+    *,
+    output_last_message_path,
+    output_schema_path=None,
+    cwd=None,
+    model=CODEX_AGENT_DEFAULT_MODEL,
+    sandbox=CODEX_AGENT_DEFAULT_SANDBOX,
+):
+    command = [
+        "codex",
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--sandbox",
+        sandbox,
+        "-C",
+        str(cwd or Path.cwd()),
+        "--output-last-message",
+        str(output_last_message_path),
+    ]
+    if output_schema_path:
+        command.extend(["--output-schema", str(output_schema_path)])
+    if model:
+        command.extend(["--model", model])
+    command.append("-")
+    return command
+
+
+def read_last_message_json(path):
+    text = Path(path).read_text(encoding="utf-8").strip()
+    if not text:
+        raise ExError("codex exec produced an empty last message")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(text[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+    raise ExError("codex exec last message is not JSON")
+
+
+def run_codex_agent(role, prompt, schema, *, cwd=None):
+    output_handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False)
+    output_path = Path(output_handle.name)
+    output_handle.close()
+    schema_path = write_output_schema_tempfile(schema)
+    command = build_codex_exec_command(
+        output_last_message_path=output_path,
+        output_schema_path=schema_path,
+        cwd=cwd,
+    )
+    try:
+        process = subprocess.run(
+            command,
+            input=prompt,
+            text=True,
+            capture_output=True,
+            check=False,
+            cwd=str(cwd or Path.cwd()),
+            env=build_codex_child_env(),
+            timeout=CODEX_AGENT_DEFAULT_TIMEOUT_SECONDS,
+        )
+        if process.returncode != 0:
+            stderr = process.stderr.strip()
+            stdout = process.stdout.strip()
+            detail = stderr or stdout or f"exit code {process.returncode}"
+            raise ExError(f"codex agent {role} failed: {detail}")
+        output = read_last_message_json(output_path)
+        if not isinstance(output, dict):
+            raise ExError(f"codex agent {role} output must be a JSON object")
+        return {
+            "role": role,
+            "model": CODEX_AGENT_DEFAULT_MODEL,
+            "sandbox": CODEX_AGENT_DEFAULT_SANDBOX,
+            "command": command,
+            "output": output,
+            "stdout_tail": process.stdout.strip().splitlines()[-20:],
+        }
+    finally:
+        output_path.unlink(missing_ok=True)
+        schema_path.unlink(missing_ok=True)
+
+
+def run_codex_agents_parallel(agent_specs, *, cwd=None):
+    if not agent_specs:
+        return {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(agent_specs)) as executor:
+        future_to_role = {
+            executor.submit(
+                run_codex_agent,
+                spec["role"],
+                spec["prompt"],
+                spec["schema"],
+                cwd=cwd,
+            ): spec["role"]
+            for spec in agent_specs
+        }
+        return {
+            future_to_role[future]: future.result()
+            for future in concurrent.futures.as_completed(future_to_role)
+        }
+
+
+def parse_yaml_text(text, label):
+    yaml = require_yaml()
+    try:
+        data = yaml.safe_load(text)
+    except Exception as exc:
+        raise ExError(f"{label} is not valid YAML: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ExError(f"{label} must be a YAML mapping")
+    return data
+
+
+def parse_yaml_value(text):
+    yaml = require_yaml()
+    try:
+        return yaml.safe_load(text)
+    except Exception as exc:
+        raise ExError(f"value is not valid YAML: {exc}") from exc
+
+
+def normalize_bool(value):
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    raise ExError("expected true or false")
+
+
+def active_plan():
+    data = load_yaml(EXEC_FILE)
+    plan_id = data.get("active_plan_id")
+    plan_dir = data.get("plan_dir")
+    if not plan_id or not plan_dir:
+        raise ExError(".agents/plan/exec.yaml is missing active_plan_id or plan_dir")
+    return str(plan_id), Path(str(plan_dir))
+
+
+def file_path(plan_dir, name):
+    mapping = {
+        "draft": "draft.md",
+        "plan": "plan.yaml",
+        "tasks": "tasks.yaml",
+        "interview": "interview.yaml",
+        "status": "status.yaml",
+        "notes": "notes.yaml",
+        "events": "events.yaml",
+        "evidence": "evidence.yaml",
+    }
+    if name not in mapping:
+        raise ExError(f"unknown file: {name}")
+    return plan_dir / mapping[name]
+
+
+def load_active_file(name):
+    _, plan_dir = active_plan()
+    return load_yaml(file_path(plan_dir, name))
+
+
+def write_active_file(name, data):
+    _, plan_dir = active_plan()
+    write_yaml(file_path(plan_dir, name), data)
+
+
+def read_text_file(path):
+    try:
+        return path.read_text()
+    except FileNotFoundError as exc:
+        raise ExError(f"missing file: {path}") from exc
+
+
+def next_id(items, prefix):
+    max_seen = 0
+    for item in items:
+        raw = str(item.get("id", ""))
+        if raw.startswith(prefix):
+            suffix = raw[len(prefix) :]
+            if suffix.isdigit():
+                max_seen = max(max_seen, int(suffix))
+    return f"{prefix}{max_seen + 1}"
+
+
+def append_event(plan_dir, kind, summary, affects, source):
+    if kind not in EVENT_KINDS:
+        raise ExError(f"unknown event kind: {kind}")
+    path = plan_dir / "events.yaml"
+    data = load_yaml(path)
+    events = data.setdefault("events", [])
+    event = {
+        "id": next_id(events, "E"),
+        "kind": kind,
+        "summary": summary,
+        "affects": affects,
+        "source": source,
+    }
+    events.append(event)
+    write_yaml(path, data)
+    return event
+
+
+def append_note(plan_dir, kind, text, why, affects, source):
+    if kind not in NOTE_KINDS:
+        raise ExError(f"unknown note kind: {kind}")
+    path = plan_dir / "notes.yaml"
+    data = load_yaml(path)
+    entries = data.setdefault("entries", [])
+    entry = {
+        "id": next_id(entries, "N"),
+        "kind": kind,
+        "text": text,
+        "why": why,
+        "affects": affects,
+        "source": source,
+    }
+    entries.append(entry)
+    write_yaml(path, data)
+    return entry
+
+
+def load_bundle():
+    plan_id, plan_dir = active_plan()
+    return {
+        "plan_id": plan_id,
+        "plan_dir": plan_dir,
+        "draft": read_text_file(plan_dir / "draft.md"),
+        "plan": load_yaml(plan_dir / "plan.yaml"),
+        "tasks": load_yaml(plan_dir / "tasks.yaml"),
+        "interview": load_yaml(plan_dir / "interview.yaml"),
+        "status": load_yaml(plan_dir / "status.yaml"),
+        "notes": load_yaml(plan_dir / "notes.yaml"),
+        "events": load_yaml(plan_dir / "events.yaml"),
+        "evidence": load_yaml(plan_dir / "evidence.yaml"),
+    }
+
+
+def task_list(bundle):
+    tasks = bundle["tasks"].get("tasks", [])
+    if not isinstance(tasks, list):
+        raise ExError("tasks.yaml must contain tasks: []")
+    return tasks
+
+
+def task_map(bundle):
+    result = {}
+    for task in task_list(bundle):
+        task_id = task.get("id")
+        if not task_id:
+            raise ExError("each task must have id")
+        if task_id in result:
+            raise ExError(f"duplicate task id: {task_id}")
+        result[task_id] = task
+    return result
+
+
+def task_status(bundle):
+    status_tasks = bundle["status"].get("tasks", {})
+    if not isinstance(status_tasks, dict):
+        raise ExError("status.yaml tasks must be a mapping")
+    return status_tasks
+
+
+def evidence_records(bundle):
+    records = bundle["evidence"].get("records", [])
+    if not isinstance(records, list):
+        raise ExError("evidence.yaml records must be a list")
+    return records
+
+
+def validate_plan_id(plan_id):
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", plan_id):
+        raise ExError("plan-id must be stable kebab-case")
+
+
+def validate_draft_markdown(plan_dir):
+    path = plan_dir / "draft.md"
+    text = read_text_file(path)
+    if not text.strip():
+        raise ExError("draft.md must not be empty")
+    if DRAFT_PLACEHOLDER_MARKER in text:
+        raise ExError("draft.md still contains the init placeholder")
+    return text
+
+
+def require_draft_approved(status):
+    if status.get("phase") not in DRAFT_APPROVED_PHASES:
+        raise ExError("draft.md must be approved before this command")
+
+
+def validate_plan(data):
+    required = [
+        "title",
+        "goal",
+        "context",
+        "non_goals",
+        "constraints",
+        "success_criteria",
+        "verification_policy",
+        "execution_strategy",
+        "stop_conditions",
+    ]
+    require_fields(data, required, "plan.yaml")
+
+
+def default_interview():
+    return {
+        "status": "open",
+        "non_user_answer_streak": 0,
+        "required_tracks": {
+            track: {"status": "open", "summary": ""}
+            for track in INTERVIEW_REQUIRED_TRACKS
+        },
+        "rounds": [],
+        "pending_user_question": None,
+        "agent_runs": [],
+        "ambiguity": {"latest": None, "history": []},
+        "closure": {
+            "ready": False,
+            "summary": "",
+            "material_blockers": [],
+            "checks": {
+                check: {"passed": False, "summary": ""}
+                for check in INTERVIEW_CLOSURE_CHECKS
+            },
+        },
+    }
+
+
+def validate_interview(data):
+    require_fields(
+        data,
+        [
+            "status",
+            "non_user_answer_streak",
+            "required_tracks",
+            "rounds",
+            "pending_user_question",
+            "agent_runs",
+            "ambiguity",
+            "closure",
+        ],
+        "interview.yaml",
+    )
+    if data["status"] not in INTERVIEW_STATUSES:
+        raise ExError("interview.yaml status must be open or closed")
+    if not isinstance(data["non_user_answer_streak"], int) or data["non_user_answer_streak"] < 0:
+        raise ExError("interview.yaml non_user_answer_streak must be a non-negative integer")
+    tracks = data["required_tracks"]
+    if not isinstance(tracks, dict):
+        raise ExError("interview.yaml required_tracks must be a mapping")
+    missing_tracks = sorted(INTERVIEW_REQUIRED_TRACK_SET - set(tracks.keys()))
+    if missing_tracks:
+        raise ExError("interview.yaml missing required tracks: " + ", ".join(missing_tracks))
+    for track_name in INTERVIEW_REQUIRED_TRACKS:
+        track = tracks[track_name]
+        if not isinstance(track, dict):
+            raise ExError(f"interview track {track_name} must be a mapping")
+        require_fields(track, ["status", "summary"], f"interview track {track_name}")
+        if track["status"] not in INTERVIEW_TRACK_STATUSES:
+            raise ExError(f"interview track {track_name} status must be open or closed")
+        if not isinstance(track["summary"], str):
+            raise ExError(f"interview track {track_name} summary must be a string")
+    rounds = data["rounds"]
+    if not isinstance(rounds, list):
+        raise ExError("interview.yaml rounds must be a list")
+    for round_item in rounds:
+        if not isinstance(round_item, dict):
+            raise ExError("interview.yaml rounds must contain mappings")
+        require_fields(round_item, ["id", "route", "track", "question", "answer", "source"], "interview round")
+        if round_item["route"] not in INTERVIEW_ROUTES:
+            raise ExError(f"interview round {round_item['id']} has invalid route")
+        if round_item["track"] not in INTERVIEW_REQUIRED_TRACK_SET:
+            raise ExError(f"interview round {round_item['id']} has invalid track")
+        source = str(round_item.get("source", "")).lower()
+        source_prefixes = INTERVIEW_SOURCE_PREFIXES[round_item["route"]]
+        if not any(source.startswith(prefix) for prefix in source_prefixes):
+            raise ExError(
+                f"interview round {round_item['id']} source must match route {round_item['route']}"
+            )
+    pending = data["pending_user_question"]
+    if pending is not None:
+        if not isinstance(pending, dict):
+            raise ExError("interview.yaml pending_user_question must be null or a mapping")
+        require_fields(pending, ["id", "route", "track", "question"], "pending_user_question")
+        if pending["route"] not in INTERVIEW_USER_ROUTES:
+            raise ExError("pending_user_question route must require user judgment")
+        if pending["track"] not in INTERVIEW_REQUIRED_TRACK_SET:
+            raise ExError("pending_user_question track is invalid")
+    if not isinstance(data["agent_runs"], list):
+        raise ExError("interview.yaml agent_runs must be a list")
+    ambiguity = data["ambiguity"]
+    if not isinstance(ambiguity, dict):
+        raise ExError("interview.yaml ambiguity must be a mapping")
+    require_fields(ambiguity, ["latest", "history"], "interview.yaml ambiguity")
+    if ambiguity["latest"] is not None and not isinstance(ambiguity["latest"], dict):
+        raise ExError("interview.yaml ambiguity.latest must be null or a mapping")
+    if not isinstance(ambiguity["history"], list):
+        raise ExError("interview.yaml ambiguity.history must be a list")
+    closure = data["closure"]
+    if not isinstance(closure, dict):
+        raise ExError("interview.yaml closure must be a mapping")
+    require_fields(closure, ["ready", "summary", "material_blockers", "checks"], "interview.yaml closure")
+    if not isinstance(closure["ready"], bool):
+        raise ExError("interview.yaml closure.ready must be true or false")
+    if not isinstance(closure["summary"], str):
+        raise ExError("interview.yaml closure.summary must be a string")
+    if not isinstance(closure["material_blockers"], list):
+        raise ExError("interview.yaml closure.material_blockers must be a list")
+    checks = closure["checks"]
+    if not isinstance(checks, dict):
+        raise ExError("interview.yaml closure.checks must be a mapping")
+    missing_checks = sorted(set(INTERVIEW_CLOSURE_CHECKS) - set(checks.keys()))
+    if missing_checks:
+        raise ExError("interview.yaml closure.checks missing: " + ", ".join(missing_checks))
+    for check_name in INTERVIEW_CLOSURE_CHECKS:
+        check = checks[check_name]
+        if not isinstance(check, dict):
+            raise ExError(f"interview closure check {check_name} must be a mapping")
+        require_fields(check, ["passed", "summary"], f"interview closure check {check_name}")
+        if not isinstance(check["passed"], bool):
+            raise ExError(f"interview closure check {check_name}.passed must be true or false")
+        if not isinstance(check["summary"], str):
+            raise ExError(f"interview closure check {check_name}.summary must be a string")
+
+
+def interview_open_tracks(interview):
+    tracks = interview.get("required_tracks", {})
+    return [
+        name
+        for name in INTERVIEW_REQUIRED_TRACKS
+        if tracks.get(name, {}).get("status") != "closed"
+    ]
+
+
+def interview_user_round_count(interview):
+    return sum(1 for item in interview.get("rounds", []) if item.get("route") in INTERVIEW_USER_ROUTES)
+
+
+def interview_round_tracks(interview):
+    tracks = {track: 0 for track in INTERVIEW_REQUIRED_TRACKS}
+    user_tracks = {track: 0 for track in INTERVIEW_REQUIRED_TRACKS}
+    for item in interview.get("rounds", []):
+        track = item.get("track")
+        if track not in tracks:
+            continue
+        tracks[track] += 1
+        if item.get("route") in INTERVIEW_USER_ROUTES:
+            user_tracks[track] += 1
+    return tracks, user_tracks
+
+
+def interview_closure_blockers(interview):
+    rounds = interview.get("rounds", [])
+    blockers = []
+    if len(rounds) < INTERVIEW_MIN_TOTAL_ROUNDS:
+        blockers.append(f"total_rounds<{INTERVIEW_MIN_TOTAL_ROUNDS}")
+    user_rounds = interview_user_round_count(interview)
+    if user_rounds < INTERVIEW_MIN_USER_ROUNDS:
+        blockers.append(f"user_judgment_rounds<{INTERVIEW_MIN_USER_ROUNDS}")
+    track_counts, user_track_counts = interview_round_tracks(interview)
+    missing_tracks = [track for track, count in track_counts.items() if count == 0]
+    if missing_tracks:
+        blockers.append("uncovered_tracks=" + ",".join(missing_tracks))
+    missing_user_tracks = [
+        track
+        for track in INTERVIEW_REQUIRED_USER_TRACKS
+        if user_track_counts.get(track, 0) == 0
+    ]
+    if missing_user_tracks:
+        blockers.append("missing_user_judgment_tracks=" + ",".join(missing_user_tracks))
+    if interview.get("non_user_answer_streak", 0) >= INTERVIEW_NON_USER_STREAK_LIMIT:
+        blockers.append("non_user_answer_streak_requires_user_judgment")
+    missing_checks = [
+        check
+        for check, state in interview.get("closure", {}).get("checks", {}).items()
+        if state.get("passed") is not True
+    ]
+    if missing_checks:
+        blockers.append("missing_closure_checks=" + ",".join(missing_checks))
+    blockers.extend(interview_ambiguity_blockers(interview))
+    return blockers
+
+
+def interview_ambiguity_blockers(interview):
+    latest = interview.get("ambiguity", {}).get("latest")
+    if not isinstance(latest, dict):
+        return ["missing_ambiguity_score"]
+    blockers = []
+    if latest.get("round_count") != len(interview.get("rounds", [])):
+        blockers.append("ambiguity_score_stale")
+    score = latest.get("ambiguity")
+    if not isinstance(score, (int, float)):
+        blockers.append("ambiguity_score_missing")
+    elif score > AMBIGUITY_THRESHOLD:
+        blockers.append(f"ambiguity>{AMBIGUITY_THRESHOLD}")
+    floor_failures = latest.get("floor_failures", [])
+    if floor_failures:
+        blockers.append("clarity_floors_failed=" + ",".join(str(item) for item in floor_failures))
+    if latest.get("ready") is not True:
+        blockers.append("ambiguity_ready=false")
+    return blockers
+
+
+def interview_focus_blocker(interview, next_track):
+    rounds = interview.get("rounds", [])
+    if len(rounds) < INTERVIEW_TRACK_FOCUS_LIMIT - 1:
+        return None
+    recent_tracks = [item.get("track") for item in rounds[-(INTERVIEW_TRACK_FOCUS_LIMIT - 1):]]
+    if any(track != next_track for track in recent_tracks):
+        return None
+    other_open_tracks = [
+        track
+        for track in interview_open_tracks(interview)
+        if track != next_track
+    ]
+    if not other_open_tracks:
+        return None
+    return (
+        f"track_focus_limit: ask a zoom-out question for one of "
+        f"{','.join(other_open_tracks)} before another {next_track} round"
+    )
+
+
+def interview_draft_ready(interview):
+    validate_interview(interview)
+    return (
+        interview.get("status") == "closed"
+        and interview.get("closure", {}).get("ready") is True
+        and not interview_open_tracks(interview)
+        and not interview_closure_blockers(interview)
+        and not interview.get("closure", {}).get("material_blockers")
+    )
+
+
+def require_interview_closed(plan_dir, action):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    if not interview_draft_ready(interview):
+        open_tracks = interview_open_tracks(interview)
+        blockers = interview.get("closure", {}).get("material_blockers", [])
+        details = []
+        if open_tracks:
+            details.append("open_tracks=" + ",".join(open_tracks))
+        if blockers:
+            details.append("material_blockers=" + ",".join(str(item) for item in blockers))
+        if interview.get("status") != "closed":
+            details.append("status=" + str(interview.get("status")))
+        if interview.get("closure", {}).get("ready") is not True:
+            details.append("closure.ready=false")
+        suffix = "; ".join(details) if details else "interview is not closed"
+        raise ExError(f"{action} requires closed interview: {suffix}")
+
+
+def validate_tasks(data):
+    require_fields(data, ["tasks"], "tasks.yaml")
+    if not isinstance(data["tasks"], list):
+        raise ExError("tasks.yaml tasks must be a list")
+    task_items = data["tasks"]
+    task_ids = {task.get("id") for task in task_items if isinstance(task, dict)}
+    ids = set()
+    graph = {}
+    final_count = 0
+    for task in task_items:
+        if not isinstance(task, dict):
+            raise ExError("each task must be a mapping")
+        required = [
+            "id",
+            "kind",
+            "title",
+            "depends_on",
+            "start_when",
+            "files",
+            "context",
+            "must_do",
+            "must_not_do",
+            "implementation_notes",
+            "verification",
+            "acceptance_criteria",
+            "expected_evidence",
+            "reopen_when",
+        ]
+        require_fields(task, required, f"task {task.get('id', '<missing>')}")
+        if "status" in task:
+            raise ExError(f"task {task['id']} must not contain status")
+        if task["id"] in ids:
+            raise ExError(f"duplicate task id: {task['id']}")
+        ids.add(task["id"])
+        if task["kind"] not in {"execution", "checkpoint", "final_verification"}:
+            raise ExError(f"task {task['id']} has invalid kind")
+        if task["kind"] == "final_verification":
+            final_count += 1
+        depends_on = task["depends_on"]
+        if not isinstance(depends_on, list):
+            raise ExError(f"task {task['id']} depends_on must be a list")
+        graph[task["id"]] = depends_on
+        start_when = task["start_when"]
+        if not isinstance(start_when, dict):
+            raise ExError(f"task {task['id']} start_when must be a mapping")
+        require_fields(start_when, ["description"], f"task {task['id']} start_when")
+        files = task["files"]
+        if not isinstance(files, dict):
+            raise ExError(f"task {task['id']} files must be a mapping")
+        require_fields(files, ["primary", "generated_incidental"], f"task {task['id']} files")
+        if not isinstance(files["primary"], list):
+            raise ExError(f"task {task['id']} files.primary must be a list")
+        if not isinstance(files["generated_incidental"], list):
+            raise ExError(f"task {task['id']} files.generated_incidental must be a list")
+        for list_field in ["must_do", "must_not_do", "implementation_notes", "acceptance_criteria", "expected_evidence", "reopen_when"]:
+            if not isinstance(task[list_field], list):
+                raise ExError(f"task {task['id']} {list_field} must be a list")
+        verification = task["verification"]
+        if not isinstance(verification, dict):
+            raise ExError(f"task {task['id']} verification must be a mapping")
+        require_fields(verification, ["evidence_required", "steps"], f"task {task['id']} verification")
+        if not isinstance(verification["evidence_required"], bool):
+            raise ExError(f"task {task['id']} verification.evidence_required must be true or false")
+        if not isinstance(verification["steps"], list):
+            raise ExError(f"task {task['id']} verification.steps must be a list")
+        step_ids = set()
+        for step in verification["steps"]:
+            if not isinstance(step, dict):
+                raise ExError(f"task {task['id']} verification step must be a mapping")
+            require_fields(step, ["id", "command", "success_signal"], f"task {task['id']} verification step")
+            if step["id"] in step_ids:
+                raise ExError(f"task {task['id']} has duplicate step id: {step['id']}")
+            step_ids.add(step["id"])
+        for expected in task.get("expected_evidence", []):
+            if not isinstance(expected, dict):
+                raise ExError(f"task {task['id']} expected_evidence must contain mappings")
+            require_fields(expected, ["step_id", "file"], f"task {task['id']} expected_evidence")
+            if expected["step_id"] not in step_ids:
+                raise ExError(f"task {task['id']} expected_evidence references unknown step: {expected['step_id']}")
+            validate_expected_evidence_path(expected["file"], f"task {task['id']} expected_evidence")
+        for dep in task["depends_on"]:
+            if dep == task["id"]:
+                raise ExError(f"task {task['id']} must not depend on itself")
+            if dep not in ids and dep not in task_ids:
+                raise ExError(f"task {task['id']} depends on unknown task: {dep}")
+    if data["tasks"] and final_count == 0:
+        raise ExError("tasks.yaml must contain at least one final_verification task")
+    validate_task_graph_acyclic(graph)
+
+
+def validate_expected_evidence_path(value, label):
+    if not isinstance(value, str):
+        raise ExError(f"{label} file must be a string")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ExError(f"{label} file must be a relative path under evidence/")
+    if not value.startswith("evidence/") or value == "evidence/":
+        raise ExError(f"{label} file must be under evidence/")
+
+
+def validate_task_graph_acyclic(graph):
+    visiting = set()
+    visited = set()
+
+    def visit(task_id, trail):
+        if task_id in visiting:
+            cycle = " -> ".join([*trail, task_id])
+            raise ExError(f"task dependency cycle detected: {cycle}")
+        if task_id in visited:
+            return
+        visiting.add(task_id)
+        for dep in graph.get(task_id, []):
+            visit(dep, [*trail, task_id])
+        visiting.remove(task_id)
+        visited.add(task_id)
+
+    for task_id in graph:
+        visit(task_id, [])
+
+
+def default_review_state():
+    return {
+        "status": "not_run",
+        "stage": "pre-draft",
+        "required_reviewers": list(REQUIRED_REVIEWERS),
+        "passed_reviewers": [],
+        "last_run_id": None,
+        "fingerprint": None,
+    }
+
+
+def validate_status(data, tasks_data=None):
+    require_fields(data, ["phase", "review", "current_task", "tasks", "halt"], "status.yaml")
+    if data["phase"] not in VALID_PHASES:
+        raise ExError(f"invalid phase: {data['phase']}")
+    review = data["review"]
+    if not isinstance(review, dict):
+        raise ExError("status.yaml review must be a mapping")
+    require_fields(
+        review,
+        ["status", "stage", "required_reviewers", "passed_reviewers", "last_run_id", "fingerprint"],
+        "status.yaml review",
+    )
+    if review["status"] not in REVIEW_STATUSES:
+        raise ExError("status.yaml review.status must be not_run, passed, or failed")
+    if review["stage"] not in REVIEW_STAGES:
+        raise ExError("status.yaml review.stage must be pre-draft")
+    if review["required_reviewers"] != list(REQUIRED_REVIEWERS):
+        raise ExError("status.yaml review.required_reviewers must match required reviewers")
+    if not isinstance(review["passed_reviewers"], list):
+        raise ExError("status.yaml review.passed_reviewers must be a list")
+    for task_id, state in data["tasks"].items():
+        if state not in TASK_STATES:
+            raise ExError(f"invalid task state for {task_id}: {state}")
+    if tasks_data is not None:
+        task_ids = {task["id"] for task in tasks_data.get("tasks", [])}
+        status_ids = set(data["tasks"].keys())
+        missing = sorted(task_ids - status_ids)
+        extra = sorted(status_ids - task_ids)
+        if missing:
+            raise ExError(f"status.yaml missing tasks: {', '.join(missing)}")
+        if extra:
+            raise ExError(f"status.yaml has unknown tasks: {', '.join(extra)}")
+
+
+def require_fields(data, fields, label):
+    for field in fields:
+        if field not in data:
+            raise ExError(f"{label} missing required field: {field}")
+
+
+def sync_status_tasks(plan_dir, tasks_data):
+    status = load_yaml(plan_dir / "status.yaml")
+    statuses = status.setdefault("tasks", {})
+    new_statuses = {}
+    for task in tasks_data.get("tasks", []):
+        task_id = task["id"]
+        new_statuses[task_id] = statuses.get(task_id, "Todo")
+    status["tasks"] = new_statuses
+    current = status.get("current_task")
+    if current and current not in new_statuses:
+        status["current_task"] = None
+    validate_status(status, tasks_data)
+    write_yaml(plan_dir / "status.yaml", status)
+
+
+def review_fingerprint(plan_dir):
+    payload = {
+        "plan": load_yaml(plan_dir / "plan.yaml"),
+        "tasks": load_yaml(plan_dir / "tasks.yaml"),
+        "interview": load_yaml(plan_dir / "interview.yaml"),
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def require_review_passed(plan_dir, status, action):
+    review = status.get("review", {})
+    if review.get("status") != "passed":
+        raise ExError(f"{action} requires pre-draft review PASS")
+    current_fingerprint = review_fingerprint(plan_dir)
+    if review.get("fingerprint") != current_fingerprint:
+        raise ExError(f"{action} requires fresh pre-draft review PASS")
+
+
+def reset_review_status(plan_dir):
+    status = load_yaml(plan_dir / "status.yaml")
+    status["review"] = default_review_state()
+    validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
+    write_yaml(plan_dir / "status.yaml", status)
+
+
+def next_review_run_id(status):
+    raw = str(status.get("review", {}).get("last_run_id") or "")
+    if raw.startswith("R") and raw[1:].isdigit():
+        return f"R{int(raw[1:]) + 1}"
+    return "R1"
+
+
+def status_groups(bundle):
+    statuses = task_status(bundle)
+    return {
+        "done": [task_id for task_id, state in statuses.items() if state == "Done"],
+        "doing": [task_id for task_id, state in statuses.items() if state == "Doing"],
+        "todo": [task_id for task_id, state in statuses.items() if state == "Todo"],
+    }
+
+
+def is_ready(task, statuses):
+    if statuses.get(task["id"]) != "Todo":
+        return False
+    return all(statuses.get(dep) == "Done" for dep in task.get("depends_on", []))
+
+
+def ready_tasks(bundle):
+    statuses = task_status(bundle)
+    if bundle["status"].get("phase") not in {"ready_for_exec", "executing"}:
+        return []
+    if bundle["status"].get("current_task"):
+        return []
+    return [task for task in task_list(bundle) if is_ready(task, statuses)]
+
+
+def final_tasks(bundle):
+    return [task for task in task_list(bundle) if task.get("kind") == "final_verification"]
+
+
+def can_finish(bundle):
+    statuses = task_status(bundle)
+    if not task_list(bundle):
+        return False
+    if any(state != "Done" for state in statuses.values()):
+        return False
+    finals = final_tasks(bundle)
+    return bool(finals) and all(statuses.get(task["id"]) == "Done" for task in finals)
+
+
+def find_task(bundle, task_id):
+    tasks = task_map(bundle)
+    if task_id not in tasks:
+        raise ExError(f"unknown task: {task_id}")
+    return tasks[task_id]
+
+
+def task_step(task, step_id):
+    for step in task.get("verification", {}).get("steps", []):
+        if step.get("id") == step_id:
+            return step
+    raise ExError(f"task {task['id']} has no verification step: {step_id}")
+
+
+def expected_evidence_for_task(task):
+    return task.get("expected_evidence", [])
+
+
+def recorded_evidence_for_task(bundle, task_id):
+    return [record for record in evidence_records(bundle) if record.get("task_id") == task_id]
+
+
+def required_evidence_missing(bundle, task):
+    if not task.get("verification", {}).get("evidence_required", False):
+        return []
+    records = recorded_evidence_for_task(bundle, task["id"])
+    recorded = {(record.get("step_id"), record.get("artifact")) for record in records if record.get("success") is True}
+    missing = []
+    for expected in expected_evidence_for_task(task):
+        key = (expected.get("step_id"), expected.get("file"))
+        if key not in recorded:
+            missing.append(expected.get("file"))
+    return missing
+
+
+def command_current(_args):
+    plan_id, plan_dir = active_plan()
+    print_result(
+        {"active_plan_id": plan_id, "plan_dir": str(plan_dir)},
+        "Use active_plan_id and plan_dir as the current bundle pointer, then continue the relevant planner or executor flow.",
+    )
+
+
+def command_show(args):
+    _, plan_dir = active_plan()
+    if args.file == "draft":
+        print(read_text_file(plan_dir / "draft.md"), end="")
+        return
+    print_yaml(load_yaml(file_path(plan_dir, args.file)))
+
+
+def command_review_context(_args):
+    bundle = load_bundle()
+    data = {
+        "active_plan": {"id": bundle["plan_id"], "dir": str(bundle["plan_dir"])},
+        "draft": bundle["draft"],
+        "plan": bundle["plan"],
+        "tasks": bundle["tasks"],
+        "interview": bundle["interview"],
+        "status": bundle["status"],
+        "notes": bundle["notes"],
+        "events": bundle["events"],
+        "evidence": bundle["evidence"],
+    }
+    try:
+        data["git"] = {
+            "log_oneline_5": run_git(["log", "--oneline", "-5"]),
+            "status_short": run_git(["status", "--short"]),
+            "diff_stat": run_git(["diff", "--stat"]),
+        }
+    except Exception as exc:
+        data["git_error"] = str(exc)
+    print_yaml(data)
+
+
+def command_doctor(_args):
+    current_yaml = False
+    current_error = None
+    try:
+        import yaml  # type: ignore
+
+        current_yaml = True
+        current_version = yaml.__version__
+    except Exception as exc:
+        current_version = None
+        current_error = str(exc)
+    venv_yaml = python_can_import_yaml(BOOTSTRAP_PYTHON)
+    data = {
+        "ok": True,
+        "active_python": sys.executable,
+        "script": str(Path(__file__)),
+        "bootstrap_dir": str(BOOTSTRAP_DIR),
+        "bootstrap_venv": str(BOOTSTRAP_VENV),
+        "bootstrap_python": str(BOOTSTRAP_PYTHON),
+        "current_python_yaml": current_yaml,
+        "current_python_yaml_version": current_version,
+        "current_python_yaml_error": current_error,
+        "bootstrap_python_exists": BOOTSTRAP_PYTHON.exists(),
+        "bootstrap_python_yaml": venv_yaml,
+        "required_action": "If current_python_yaml or bootstrap_python_yaml is true, continue the requested co flow; otherwise resolve the reported Python or PyYAML environment issue.",
+    }
+    print_simple_yaml(data)
+
+
+def run_git(args):
+    return subprocess.run(["git", *args], check=False, text=True, capture_output=True).stdout.splitlines()
+
+
+def planner_init(args):
+    require_yaml()
+    validate_plan_id(args.plan_id)
+    plan_dir = PLAN_ROOT / args.plan_id
+    if plan_dir.exists():
+        if not args.replace:
+            raise ExError(f"{plan_dir} already exists; use --replace to recreate it")
+        shutil.rmtree(plan_dir)
+    (plan_dir / "evidence").mkdir(parents=True, exist_ok=True)
+    PLAN_ROOT.mkdir(parents=True, exist_ok=True)
+
+    write_yaml(EXEC_FILE, {"active_plan_id": args.plan_id, "plan_dir": str(plan_dir)})
+    (plan_dir / "draft.md").write_text(
+        "\n".join(
+            [
+                DRAFT_PLACEHOLDER_MARKER,
+                f"# {args.title}",
+                "",
+                "Draft is pending. Close the interview, then replace this file with the user-reviewable Markdown draft.",
+                "",
+            ]
+        )
+    )
+    write_yaml(
+        plan_dir / "plan.yaml",
+        {
+            "title": args.title,
+            "goal": "",
+            "context": [],
+            "non_goals": [],
+            "constraints": [],
+            "success_criteria": [],
+            "verification_policy": [],
+            "execution_strategy": [],
+            "stop_conditions": ["user_decision", "external_environment"],
+        },
+    )
+    write_yaml(plan_dir / "tasks.yaml", {"tasks": []})
+    write_yaml(plan_dir / "interview.yaml", default_interview())
+    write_yaml(
+        plan_dir / "status.yaml",
+        {
+            "phase": "drafting",
+            "review": default_review_state(),
+            "current_task": None,
+            "tasks": {},
+            "halt": None,
+        },
+    )
+    write_yaml(plan_dir / "notes.yaml", {"entries": []})
+    write_yaml(plan_dir / "events.yaml", {"events": []})
+    write_yaml(plan_dir / "evidence.yaml", {"records": []})
+    append_event(
+        plan_dir,
+        "plan_initialized",
+        "Initialized plan execution.",
+        ["exec.yaml", "status.yaml#phase"],
+        "co planner init",
+    )
+    print_result(
+        {"active_plan_id": args.plan_id, "plan_dir": str(plan_dir)},
+        "Explore the repository for code facts, then run `co planner interview ask-next --runner codex`.",
+        "co planner interview ask-next --runner codex",
+    )
+
+
+def planner_interview_status(_args):
+    _, plan_dir = active_plan()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    open_tracks = interview_open_tracks(interview)
+    streak = interview.get("non_user_answer_streak", 0)
+    if streak >= INTERVIEW_NON_USER_STREAK_LIMIT:
+        next_allowed_routes = sorted(INTERVIEW_USER_ROUTES)
+    else:
+        next_allowed_routes = sorted(INTERVIEW_ROUTES)
+    print_result(
+        {
+            "status": interview["status"],
+            "draft_ready": interview_draft_ready(interview),
+            "open_tracks": open_tracks,
+            "next_allowed_routes": next_allowed_routes,
+            "non_user_answer_streak": streak,
+            "total_rounds": len(interview.get("rounds", [])),
+            "user_judgment_rounds": interview_user_round_count(interview),
+            "track_rounds": interview_round_tracks(interview)[0],
+            "user_judgment_tracks": interview_round_tracks(interview)[1],
+            "closure_blockers": interview_closure_blockers(interview),
+            "ambiguity": interview.get("ambiguity"),
+            "closure": interview["closure"],
+        },
+        "Inspect closure_blockers, open_tracks, and ambiguity; then run the next allowed interview command.",
+    )
+
+
+def agent_context(plan_dir):
+    bundle = {
+        "draft": read_text_file(plan_dir / "draft.md"),
+        "plan": load_yaml(plan_dir / "plan.yaml"),
+        "tasks": load_yaml(plan_dir / "tasks.yaml"),
+        "interview": load_yaml(plan_dir / "interview.yaml"),
+        "status": load_yaml(plan_dir / "status.yaml"),
+        "notes": load_yaml(plan_dir / "notes.yaml"),
+        "events": load_yaml(plan_dir / "events.yaml"),
+    }
+    return dump_json(
+        {
+            "repo_root": str(Path.cwd()),
+            "bundle_path": str(plan_dir),
+            "bundle": bundle,
+        }
+    )
+
+
+def append_interview_agent_run(plan_dir, interview, role, status, output=None, error=None, command_options=None):
+    runs = interview.setdefault("agent_runs", [])
+    run = {
+        "id": next_id(runs, "A"),
+        "role": role,
+        "model": CODEX_AGENT_DEFAULT_MODEL,
+        "sandbox": CODEX_AGENT_DEFAULT_SANDBOX,
+        "command_options": command_options
+        or {
+            "json": True,
+            "skip_git_repo_check": True,
+            "ephemeral": True,
+            "sandbox": CODEX_AGENT_DEFAULT_SANDBOX,
+            "model": CODEX_AGENT_DEFAULT_MODEL,
+        },
+        "status": status,
+        "output": output,
+        "error": error,
+    }
+    runs.append(run)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    append_event(
+        plan_dir,
+        "codex_agent_ran",
+        f"Codex CLI agent {role} {status}.",
+        ["interview.yaml#agent_runs"],
+        f"co planner interview {role}",
+    )
+    return run
+
+
+def run_interview_codex_agent(plan_dir, interview, role, prompt, schema):
+    try:
+        result = run_codex_agent(role, prompt, schema, cwd=Path.cwd())
+    except Exception as exc:
+        append_interview_agent_run(plan_dir, interview, role, "failed", error=str(exc))
+        raise
+    append_interview_agent_run(plan_dir, interview, role, "passed", output=result["output"])
+    return result["output"]
+
+
+def ask_next_schema():
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "action": {"type": "string", "enum": ["ask_user", "record_fact", "ready_for_score"]},
+            "route": {"type": "string", "enum": sorted(INTERVIEW_ROUTES)},
+            "track": {"type": "string", "enum": list(INTERVIEW_REQUIRED_TRACKS)},
+            "question": {"type": "string"},
+            "answer": {"type": "string"},
+            "source": {"type": "string"},
+            "reason": {"type": "string"},
+        },
+        "required": ["action", "route", "track", "question", "answer", "source", "reason"],
+    }
+
+
+def score_schema():
+    component = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "clarity_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+            "justification": {"type": "string"},
+        },
+        "required": ["clarity_score", "justification"],
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "project_mode": {"type": "string", "enum": ["greenfield", "brownfield"]},
+            "components": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "goal_clarity": component,
+                    "constraint_clarity": component,
+                    "success_criteria_clarity": component,
+                    "context_clarity": component,
+                },
+                "required": [
+                    "goal_clarity",
+                    "constraint_clarity",
+                    "success_criteria_clarity",
+                    "context_clarity",
+                ],
+            },
+            "weakest_dimension": {"type": "string"},
+            "recommended_followup": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "route": {"type": "string", "enum": sorted(INTERVIEW_USER_ROUTES)},
+                    "track": {"type": "string", "enum": list(INTERVIEW_REQUIRED_TRACKS)},
+                    "question": {"type": "string"},
+                },
+                "required": ["route", "track", "question"],
+            },
+            "summary": {"type": "string"},
+        },
+        "required": ["project_mode", "components", "weakest_dimension", "recommended_followup", "summary"],
+    }
+
+
+def review_schema():
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "status": {"type": "string", "enum": ["PASS", "FAIL"]},
+            "summary": {"type": "string"},
+            "issues": {"type": "array", "items": {"type": "string"}},
+            "optional_tightenings": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["status", "summary", "issues", "optional_tightenings"],
+    }
+
+
+def ask_next_prompt(plan_dir):
+    return (
+        "You are the coplan interview agent. Inspect the provided bundle context and choose the single next action that most reduces planning ambiguity.\n"
+        "Return JSON only. If user judgment is needed, action=ask_user with route user_decision or code_plus_decision. If you can safely record a repo/research fact from the provided context, action=record_fact with route code_fact or research_confirmation. If enough material exists for scoring, action=ready_for_score.\n"
+        "Use one of these tracks: scope, non_goals, outputs, verification, constraints, stop_conditions. Do not self-answer user-owned decisions.\n\n"
+        f"Context:\n{agent_context(plan_dir)}"
+    )
+
+
+def score_prompt(plan_dir, project_mode):
+    return (
+        "You are the coplan ambiguity scoring agent. Score requirement clarity from 0.0 to 1.0. Use low-variance judgment; scoring_temperature_intent is 0.1. Return JSON only.\n"
+        "Score goal_clarity, constraint_clarity, success_criteria_clarity, and context_clarity. For greenfield, still provide context_clarity but it will not be weighted.\n"
+        f"Requested project_mode: {project_mode}.\n"
+        "Do not declare readiness in prose; the CLI will compute weighted clarity and ambiguity.\n\n"
+        f"Context:\n{agent_context(plan_dir)}"
+    )
+
+
+def reviewer_prompt(plan_dir, reviewer):
+    if reviewer == "contract_reviewer":
+        focus = (
+            "Review hidden decisions, scope drift, contradictions, task DAG assumptions, file scope, and acceptance criteria. "
+            "Block if the plan asks execution to choose between materially different user-visible behaviors."
+        )
+    else:
+        focus = (
+            "Review verification commands, evidence, final verification, and success signals. "
+            "Block if verification would not prove the user's intended behavior."
+        )
+    return (
+        f"You are the {reviewer} for a coplan bundle. {focus}\n"
+        "Return JSON only with status PASS or FAIL. Do not re-check mechanical schema fields owned by co planner validate unless the semantics are meaningless.\n\n"
+        f"Context:\n{agent_context(plan_dir)}"
+    )
+
+
+def create_pending_question(plan_dir, interview, route, track, question, source_command):
+    if interview.get("status") == "closed":
+        raise ExError("interview is closed; reopen a track before asking more questions")
+    if interview.get("pending_user_question") is not None:
+        raise ExError("pending user question already exists; record its answer before asking another")
+    if track not in INTERVIEW_REQUIRED_TRACK_SET:
+        raise ExError(f"unknown interview track: {track}")
+    if route not in INTERVIEW_USER_ROUTES:
+        raise ExError("interview ask only supports user_decision or code_plus_decision")
+    focus_blocker = interview_focus_blocker(interview, track)
+    if focus_blocker:
+        raise ExError(focus_blocker)
+    pending = {
+        "id": next_id(interview.get("rounds", []), "Q"),
+        "route": route,
+        "track": track,
+        "question": question,
+    }
+    interview["pending_user_question"] = pending
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    append_event(
+        plan_dir,
+        "interview_question_asked",
+        f"Asked pending user question {pending['id']} for {track}.",
+        ["interview.yaml#pending_user_question"],
+        source_command,
+    )
+    return pending
+
+
+def planner_interview_ask(args):
+    _, plan_dir = active_plan()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    pending = create_pending_question(
+        plan_dir,
+        interview,
+        args.route,
+        args.track,
+        args.question,
+        "co planner interview ask",
+    )
+    print_result(
+        {"pending_user_question": pending},
+        "Ask the user pending_user_question.question exactly, then record the answer with `co planner interview record`.",
+    )
+
+
+def planner_interview_ask_next(args):
+    _, plan_dir = active_plan()
+    if args.runner != "codex":
+        raise ExError("interview ask-next supports only --runner codex")
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    output = run_interview_codex_agent(
+        plan_dir,
+        interview,
+        "ask-next",
+        ask_next_prompt(plan_dir),
+        ask_next_schema(),
+    )
+    interview = load_yaml(plan_dir / "interview.yaml")
+    action = output["action"]
+    if action == "ask_user":
+        pending = create_pending_question(
+            plan_dir,
+            interview,
+            output["route"],
+            output["track"],
+            output["question"],
+            "co planner interview ask-next",
+        )
+        print_result(
+            {"action": action, "pending_user_question": pending, "reason": output["reason"]},
+            "Ask the user pending_user_question.question exactly, then record the answer with `co planner interview record`.",
+        )
+        return
+    if action == "record_fact":
+        if output["route"] not in INTERVIEW_NON_USER_ROUTES:
+            raise ExError("ask-next record_fact requires code_fact or research_confirmation")
+        if interview.get("pending_user_question") is not None:
+            raise ExError("record the pending user answer before adding non-user interview facts")
+        class RecordArgs:
+            pass
+        record_args = RecordArgs()
+        record_args.route = output["route"]
+        record_args.track = output["track"]
+        record_args.question = output["question"]
+        record_args.answer = output["answer"]
+        record_args.source = output["source"]
+        planner_interview_record(record_args)
+        return
+    print_result(
+        {
+            "action": action,
+            "reason": output["reason"],
+        },
+        "Run the command in next_command.",
+        "co planner interview score --runner codex --mode auto",
+    )
+
+
+def component_score(components, name):
+    component = components.get(name)
+    if not isinstance(component, dict):
+        raise ExError(f"ambiguity scorer missing component: {name}")
+    value = component.get("clarity_score")
+    if not isinstance(value, (int, float)) or value < 0 or value > 1:
+        raise ExError(f"ambiguity scorer component {name} must be 0.0-1.0")
+    return float(value)
+
+
+def normalize_ambiguity_score(output, interview, requested_mode):
+    project_mode = output.get("project_mode")
+    if requested_mode != "auto":
+        project_mode = requested_mode
+    if project_mode not in AMBIGUITY_WEIGHTS:
+        raise ExError("ambiguity scorer project_mode must be greenfield or brownfield")
+    components = output.get("components")
+    if not isinstance(components, dict):
+        raise ExError("ambiguity scorer components must be a mapping")
+    weights = AMBIGUITY_WEIGHTS[project_mode]
+    weighted_clarity = 0.0
+    floor_failures = []
+    normalized_components = {}
+    for name, weight in weights.items():
+        clarity = component_score(components, name)
+        weighted_clarity += clarity * weight
+        floor = AMBIGUITY_FLOORS[name]
+        if clarity < floor:
+            floor_failures.append(f"{name} {clarity:.2f} < {floor:.2f}")
+        normalized_components[name] = {
+            "clarity_score": clarity,
+            "weight": weight,
+            "justification": str(components[name].get("justification", "")),
+        }
+    if project_mode == "greenfield" and "context_clarity" in components:
+        normalized_components["context_clarity"] = {
+            "clarity_score": component_score(components, "context_clarity"),
+            "weight": 0.0,
+            "justification": str(components["context_clarity"].get("justification", "")),
+        }
+    ambiguity = max(0.0, min(1.0, 1.0 - weighted_clarity))
+    ready = ambiguity <= AMBIGUITY_THRESHOLD and not floor_failures
+    history = interview.get("ambiguity", {}).get("history", [])
+    return {
+        "id": next_id(history, "S"),
+        "project_mode": project_mode,
+        "threshold": AMBIGUITY_THRESHOLD,
+        "weighted_clarity": round(weighted_clarity, 4),
+        "ambiguity": round(ambiguity, 4),
+        "ready": ready,
+        "floor_failures": floor_failures,
+        "components": normalized_components,
+        "weakest_dimension": str(output.get("weakest_dimension", "")),
+        "recommended_followup": output.get("recommended_followup"),
+        "summary": str(output.get("summary", "")),
+        "round_count": len(interview.get("rounds", [])),
+        "scoring_temperature_intent": AMBIGUITY_SCORING_TEMPERATURE_INTENT,
+        "model": CODEX_AGENT_DEFAULT_MODEL,
+    }
+
+
+def planner_interview_score(args):
+    _, plan_dir = active_plan()
+    if args.runner != "codex":
+        raise ExError("interview score supports only --runner codex")
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    output = run_interview_codex_agent(
+        plan_dir,
+        interview,
+        "score",
+        score_prompt(plan_dir, args.mode),
+        score_schema(),
+    )
+    interview = load_yaml(plan_dir / "interview.yaml")
+    score = normalize_ambiguity_score(output, interview, args.mode)
+    ambiguity = interview.setdefault("ambiguity", {"latest": None, "history": []})
+    history = ambiguity.setdefault("history", [])
+    history.append(score)
+    ambiguity["latest"] = score
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    append_event(
+        plan_dir,
+        "interview_scored",
+        f"Ambiguity scored at {score['ambiguity']}.",
+        ["interview.yaml#ambiguity"],
+        "co planner interview score",
+    )
+    print_result(
+        {"ambiguity": score},
+        "If ambiguity.ready is false, ask the recommended follow-up; otherwise close tracks, pass closure checks, and close the interview.",
+    )
+
+
+def planner_interview_record(args):
+    _, plan_dir = active_plan()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    if interview.get("status") == "closed":
+        raise ExError("interview is closed; reopen a track before recording more answers")
+    if args.track not in INTERVIEW_REQUIRED_TRACK_SET:
+        raise ExError(f"unknown interview track: {args.track}")
+    if (
+        interview.get("non_user_answer_streak", 0) >= INTERVIEW_NON_USER_STREAK_LIMIT
+        and args.route not in INTERVIEW_USER_ROUTES
+    ):
+        raise ExError("next interview answer must require user judgment after 3 non-user answers")
+    focus_blocker = interview_focus_blocker(interview, args.track)
+    if focus_blocker:
+        raise ExError(focus_blocker)
+    pending = interview.get("pending_user_question")
+    if args.route in INTERVIEW_USER_ROUTES:
+        if pending is None:
+            raise ExError("user-judgment answers require a pending question from co planner interview ask")
+        if (
+            pending.get("route") != args.route
+            or pending.get("track") != args.track
+            or pending.get("question") != args.question
+        ):
+            raise ExError("user-judgment answer must match the pending user question")
+        round_id = pending["id"]
+    else:
+        if pending is not None:
+            raise ExError("record the pending user answer before adding non-user interview facts")
+        round_id = next_id(interview.get("rounds", []), "Q")
+    rounds = interview.setdefault("rounds", [])
+    round_item = {
+        "id": round_id,
+        "route": args.route,
+        "track": args.track,
+        "question": args.question,
+        "answer": args.answer,
+        "source": args.source,
+    }
+    rounds.append(round_item)
+    if args.route in INTERVIEW_NON_USER_ROUTES:
+        interview["non_user_answer_streak"] = interview.get("non_user_answer_streak", 0) + 1
+    else:
+        interview["non_user_answer_streak"] = 0
+    interview["status"] = "open"
+    interview["pending_user_question"] = None
+    interview["closure"]["ready"] = False
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    append_event(
+        plan_dir,
+        "interview_recorded",
+        f"Recorded interview answer {round_item['id']} for {args.track}.",
+        ["interview.yaml#rounds", "interview.yaml#non_user_answer_streak"],
+        "co planner interview record",
+    )
+    print_result(
+        {"round": round_item, "non_user_answer_streak": interview["non_user_answer_streak"]},
+        "Run `co planner interview score --runner codex --mode auto`.",
+        "co planner interview score --runner codex --mode auto",
+    )
+
+
+def planner_interview_track(args):
+    _, plan_dir = active_plan()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    if args.track not in INTERVIEW_REQUIRED_TRACK_SET:
+        raise ExError(f"unknown interview track: {args.track}")
+    track = interview["required_tracks"][args.track]
+    if args.track_action == "close":
+        track["status"] = "closed"
+        track["summary"] = args.summary
+        summary = f"Interview track {args.track} closed."
+    else:
+        track["status"] = "open"
+        track["summary"] = ""
+        interview["status"] = "open"
+        interview["closure"]["ready"] = False
+        interview["closure"]["summary"] = ""
+        status = load_yaml(plan_dir / "status.yaml")
+        status["phase"] = "drafting"
+        validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
+        write_yaml(plan_dir / "status.yaml", status)
+        summary = f"Interview track {args.track} reopened: {args.reason}"
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    affects = [f"interview.yaml#required_tracks.{args.track}", "interview.yaml#closure"]
+    if args.track_action == "open":
+        affects.append("status.yaml#phase")
+    append_event(
+        plan_dir,
+        "interview_track_changed",
+        summary,
+        affects,
+        f"co planner interview track {args.track_action}",
+    )
+    if args.track_action == "close":
+        required_action = "Continue closing remaining tracks and closure checks; then run `co planner interview close --summary \"...\"` when blockers are clear."
+    else:
+        required_action = "Create a pending question for the reopened track, record the user answer, rerun scoring, and close the track again."
+    print_result({"track": args.track, "status": track["status"]}, required_action)
+
+
+def planner_interview_closure_check(args):
+    _, plan_dir = active_plan()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    if args.check not in INTERVIEW_CLOSURE_CHECKS:
+        raise ExError(f"unknown closure check: {args.check}")
+    check = interview["closure"]["checks"][args.check]
+    check["passed"] = True
+    check["summary"] = args.summary
+    interview["status"] = "open"
+    interview["closure"]["ready"] = False
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    append_event(
+        plan_dir,
+        "interview_closure_checked",
+        f"Interview closure check passed: {args.check}.",
+        [f"interview.yaml#closure.checks.{args.check}", "interview.yaml#closure"],
+        "co planner interview closure-check",
+    )
+    print_result(
+        {"check": args.check, "passed": True},
+        "Continue remaining closure checks or run `co planner interview close --summary \"...\"` when all blockers are clear.",
+    )
+
+
+def planner_interview_blocker(args):
+    _, plan_dir = active_plan()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    blockers = interview["closure"]["material_blockers"]
+    if args.blocker_action == "add":
+        if args.reason not in blockers:
+            blockers.append(args.reason)
+        summary = "Interview material blocker added."
+    else:
+        if args.reason in blockers:
+            blockers.remove(args.reason)
+        summary = "Interview material blocker cleared."
+    interview["status"] = "open"
+    interview["closure"]["ready"] = False
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    append_event(
+        plan_dir,
+        "interview_blocker_changed",
+        summary,
+        ["interview.yaml#closure.material_blockers", "interview.yaml#closure"],
+        f"co planner interview blocker {args.blocker_action}",
+    )
+    print_result(
+        {"material_blockers": blockers},
+        "Resolve any remaining material_blockers; when empty and all gates pass, run `co planner interview close --summary \"...\"`.",
+    )
+
+
+def planner_interview_close(args):
+    _, plan_dir = active_plan()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    if interview.get("pending_user_question") is not None:
+        raise ExError("cannot close interview; pending user question is unanswered")
+    open_tracks = interview_open_tracks(interview)
+    blockers = interview.get("closure", {}).get("material_blockers", [])
+    if open_tracks:
+        raise ExError("cannot close interview; open tracks: " + ", ".join(open_tracks))
+    if blockers:
+        raise ExError("cannot close interview; material blockers: " + ", ".join(str(item) for item in blockers))
+    closure_blockers = interview_closure_blockers(interview)
+    if closure_blockers:
+        raise ExError("cannot close interview; closure blockers: " + ", ".join(closure_blockers))
+    interview["status"] = "closed"
+    interview["closure"]["ready"] = True
+    interview["closure"]["summary"] = args.summary
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    append_event(
+        plan_dir,
+        "interview_closed",
+        "Interview closed and draft gate opened.",
+        ["interview.yaml#status", "interview.yaml#closure"],
+        "co planner interview close",
+    )
+    print_result(
+        {"status": "closed", "draft_ready": True},
+        "Run `co planner generate-skeleton`.",
+        "co planner generate-skeleton",
+    )
+
+
+def skeleton_draft(title, interview):
+    tracks = interview.get("required_tracks", {})
+    facts = [
+        item
+        for item in interview.get("rounds", [])
+        if item.get("route") in {"code_fact", "research_confirmation"}
+    ]
+    fact_lines = "\n".join(
+        f"| {item.get('answer', '')} | {item.get('source', '')} |" for item in facts
+    ) or "| No repository facts recorded yet. | n/a |"
+    return "\n".join(
+        [
+            f"# {title}",
+            "",
+            "## Goal",
+            tracks.get("scope", {}).get("summary") or "Summarize the user-visible goal.",
+            "",
+            "## Scope",
+            "| Included | Excluded |",
+            "|---|---|",
+            f"| {tracks.get('scope', {}).get('summary') or 'TBD'} | {tracks.get('non_goals', {}).get('summary') or 'TBD'} |",
+            "",
+            "## Known Facts",
+            "| Fact | Source |",
+            "|---|---|",
+            fact_lines,
+            "",
+            "## Verification Direction",
+            "| Check | Expected Signal |",
+            "|---|---|",
+            f"| {tracks.get('verification', {}).get('summary') or 'TBD'} | Evidence proves the requested behavior. |",
+            "",
+        ]
+    )
+
+
+def skeleton_plan(title, interview):
+    tracks = interview.get("required_tracks", {})
+    facts = [
+        item.get("answer", "")
+        for item in interview.get("rounds", [])
+        if item.get("route") in {"code_fact", "research_confirmation"}
+    ]
+    return {
+        "title": title,
+        "goal": tracks.get("scope", {}).get("summary") or "",
+        "context": facts,
+        "non_goals": [tracks.get("non_goals", {}).get("summary") or ""],
+        "constraints": [tracks.get("constraints", {}).get("summary") or ""],
+        "success_criteria": [tracks.get("outputs", {}).get("summary") or ""],
+        "verification_policy": [tracks.get("verification", {}).get("summary") or ""],
+        "execution_strategy": ["Execute the planned tasks and final verification in dependency order."],
+        "stop_conditions": [tracks.get("stop_conditions", {}).get("summary") or "user_decision", "external_environment"],
+    }
+
+
+def skeleton_tasks():
+    return {
+        "tasks": [
+            {
+                "id": "FV1",
+                "kind": "final_verification",
+                "title": "Run final verification",
+                "depends_on": [],
+                "start_when": {"description": "All execution tasks are Done."},
+                "files": {"primary": [], "generated_incidental": []},
+                "context": "Final verification proves the approved plan contract.",
+                "must_do": ["Run the verification named in the plan."],
+                "must_not_do": ["Do not add new implementation scope during final verification."],
+                "implementation_notes": ["Replace this skeleton with concrete repo-native verification before finalize."],
+                "verification": {
+                    "evidence_required": True,
+                    "steps": [
+                        {
+                            "id": "final",
+                            "command": "TBD",
+                            "success_signal": "Concrete success signal is recorded.",
+                        }
+                    ],
+                },
+                "acceptance_criteria": ["Final verification evidence is recorded."],
+                "expected_evidence": [{"step_id": "final", "file": "evidence/fv1-final.txt"}],
+                "reopen_when": ["Any final verification command fails."],
+            }
+        ]
+    }
+
+
+def planner_generate_skeleton(_args):
+    _, plan_dir = active_plan()
+    require_interview_closed(plan_dir, "generate skeleton")
+    interview = load_yaml(plan_dir / "interview.yaml")
+    plan = load_yaml(plan_dir / "plan.yaml")
+    title = plan.get("title") or plan_dir.name.replace("-", " ").title()
+    (plan_dir / "draft.md").write_text(skeleton_draft(title, interview), encoding="utf-8")
+    write_yaml(plan_dir / "plan.yaml", skeleton_plan(title, interview))
+    tasks = skeleton_tasks()
+    write_yaml(plan_dir / "tasks.yaml", tasks)
+    sync_status_tasks(plan_dir, tasks)
+    reset_review_status(plan_dir)
+    append_event(
+        plan_dir,
+        "skeleton_generated",
+        "Generated draft, plan, and task skeletons.",
+        ["draft.md", "plan.yaml", "tasks.yaml", "status.yaml#tasks", "status.yaml#review"],
+        "co planner generate-skeleton",
+    )
+    print_result(
+        {"written": ["draft.md", "plan.yaml", "tasks.yaml"]},
+        "Patch only draft.md, plan.yaml, and tasks.yaml, then run `co planner validate`.",
+        "co planner validate",
+    )
+
+
+def planner_approve_draft(args):
+    _, plan_dir = active_plan()
+    require_interview_closed(plan_dir, "draft approval")
+    validate_draft_markdown(plan_dir)
+    status = load_yaml(plan_dir / "status.yaml")
+    require_review_passed(plan_dir, status, "draft approval")
+    status["phase"] = "planning"
+    validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
+    write_yaml(plan_dir / "status.yaml", status)
+    if args.comment:
+        append_note(
+            plan_dir,
+            "decision",
+            args.comment,
+            "Draft approval comment.",
+            ["draft.md", "status.yaml#phase"],
+            "co planner approve-draft",
+        )
+    append_event(
+        plan_dir,
+        "draft_approved",
+        "Draft approved and planning phase opened.",
+        ["draft.md", "status.yaml#phase"],
+        "co planner approve-draft",
+    )
+    print_result(
+        {"phase": "planning"},
+        "Run `co planner validate`, then `co planner finalize`.",
+        "co planner validate",
+    )
+
+
+def planner_finalize(_args):
+    _, plan_dir = active_plan()
+    require_interview_closed(plan_dir, "planner finalize")
+    validate_draft_markdown(plan_dir)
+    plan = load_yaml(plan_dir / "plan.yaml")
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    status = load_yaml(plan_dir / "status.yaml")
+    validate_plan(plan)
+    validate_tasks(tasks)
+    validate_status(status, tasks)
+    require_draft_approved(status)
+    require_review_passed(plan_dir, status, "planner finalize")
+    status["phase"] = "ready_for_exec"
+    write_yaml(plan_dir / "status.yaml", status)
+    append_event(
+        plan_dir,
+        "bundle_finalized",
+        "Bundle finalized and ready for execution.",
+        ["status.yaml#phase"],
+        "co planner finalize",
+    )
+    print_result(
+        {"phase": "ready_for_exec"},
+        "Planning is finalized. Switch to the `coexec` skill and start with `co exec status`.",
+        "co exec status",
+    )
+
+
+def planner_validate(_args):
+    _, plan_dir = active_plan()
+    require_interview_closed(plan_dir, "planner validate")
+    validate_draft_markdown(plan_dir)
+    plan = load_yaml(plan_dir / "plan.yaml")
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    status = load_yaml(plan_dir / "status.yaml")
+    validate_plan(plan)
+    validate_tasks(tasks)
+    validate_status(status, tasks)
+    print_result(
+        {"validated": ["draft.md", "plan.yaml", "tasks.yaml", "interview.yaml", "status.yaml"]},
+        "If pre-draft review has not passed, run `co planner review run --runner codex --stage pre-draft`; otherwise continue approval or finalize.",
+    )
+
+
+def planner_review_run(args):
+    _, plan_dir = active_plan()
+    if args.runner != "codex":
+        raise ExError("planner review supports only --runner codex")
+    if args.stage != "pre-draft":
+        raise ExError("planner review supports only --stage pre-draft")
+    require_interview_closed(plan_dir, "planner review")
+    validate_draft_markdown(plan_dir)
+    plan = load_yaml(plan_dir / "plan.yaml")
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    status = load_yaml(plan_dir / "status.yaml")
+    validate_plan(plan)
+    validate_tasks(tasks)
+    validate_status(status, tasks)
+
+    reviewer_outputs = run_codex_agents_parallel(
+        [
+            {
+                "role": reviewer,
+                "prompt": reviewer_prompt(plan_dir, reviewer),
+                "schema": review_schema(),
+            }
+            for reviewer in REQUIRED_REVIEWERS
+        ],
+        cwd=Path.cwd(),
+    )
+
+    results = []
+    passed_reviewers = []
+    for reviewer in REQUIRED_REVIEWERS:
+        result = reviewer_outputs[reviewer]["output"]
+        review_status = result["status"]
+        if review_status == "PASS":
+            passed_reviewers.append(reviewer)
+        results.append({"reviewer": reviewer, **result})
+        append_note(
+            plan_dir,
+            "decision" if review_status == "PASS" else "risk",
+            f"{reviewer} {review_status}: {result['summary']}",
+            "Codex CLI pre-draft plan review.",
+            ["plan.yaml", "tasks.yaml"],
+            "co planner review run",
+        )
+        append_event(
+            plan_dir,
+            "planner_review_recorded",
+            f"{reviewer} returned {review_status}.",
+            ["status.yaml#review", "notes.yaml"],
+            "co planner review run",
+        )
+
+    previous_status = status
+    status = load_yaml(plan_dir / "status.yaml")
+    status["review"] = {
+        **default_review_state(),
+        "status": "passed" if len(passed_reviewers) == len(REQUIRED_REVIEWERS) else "failed",
+        "stage": "pre-draft",
+        "required_reviewers": list(REQUIRED_REVIEWERS),
+        "passed_reviewers": passed_reviewers,
+        "last_run_id": next_review_run_id(previous_status),
+        "fingerprint": review_fingerprint(plan_dir) if len(passed_reviewers) == len(REQUIRED_REVIEWERS) else None,
+    }
+    validate_status(status, tasks)
+    write_yaml(plan_dir / "status.yaml", status)
+    if status["review"]["status"] == "passed":
+        append_event(
+            plan_dir,
+            "planner_review_passed",
+            "All required Codex CLI pre-draft reviewers passed.",
+            ["status.yaml#review"],
+            "co planner review run",
+        )
+    if status["review"]["status"] == "passed":
+        required_action = "Show `draft.md` to the user with `co show --file draft`; after approval, run `co planner approve-draft --comment \"...\"`."
+        next_command = "co show --file draft"
+    else:
+        required_action = "Patch valid reviewer findings in draft.md, plan.yaml, or tasks.yaml, then rerun pre-draft review."
+        next_command = "co planner review run --runner codex --stage pre-draft"
+    print_result(
+        {"ok": status["review"]["status"] == "passed", "review": status["review"], "results": results},
+        required_action,
+        next_command,
+    )
+
+
+def planner_review_status(_args):
+    _, plan_dir = active_plan()
+    status = load_yaml(plan_dir / "status.yaml")
+    validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
+    if status["review"]["status"] == "passed":
+        required_action = "Continue user draft review or draft approval."
+    else:
+        required_action = "Run or rerun `co planner review run --runner codex --stage pre-draft` after fixing bundle files."
+    print_result({"review": status["review"]}, required_action)
+
+
+def note_append(args):
+    _, plan_dir = active_plan()
+    affects = args.affects or []
+    entry = append_note(plan_dir, args.kind, args.text, args.why, affects, args.source)
+    print_result({"entry": entry}, "Continue the current planner or executor flow.")
+
+
+def note_list(args):
+    notes = load_active_file("notes")
+    entries = notes.get("entries", [])
+    if args.kind:
+        entries = [entry for entry in entries if entry.get("kind") == args.kind]
+    print_result({"entries": entries}, "Use the listed notes as context, then continue the current flow.")
+
+
+def exec_start(_args):
+    _, plan_dir = active_plan()
+    status = load_yaml(plan_dir / "status.yaml")
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    validate_status(status, tasks)
+    if status["phase"] != "ready_for_exec":
+        raise ExError("execution can start only from ready_for_exec")
+    status["phase"] = "executing"
+    write_yaml(plan_dir / "status.yaml", status)
+    append_event(
+        plan_dir,
+        "phase_changed",
+        "Execution started.",
+        ["status.yaml#phase"],
+        "co exec start",
+    )
+    print_result(
+        {"phase": "executing"},
+        "Run `co exec status` and follow allowed_now.",
+        "co exec status",
+    )
+
+
+def exec_ready(_args):
+    bundle = load_bundle()
+    ready_ids = [task["id"] for task in ready_tasks(bundle)]
+    if ready_ids:
+        required_action = "Claim exactly one task from ready_now with `co exec claim <task-id>`."
+    else:
+        required_action = "Run `co exec status`; if can_finish is true, run `co exec finish`, otherwise continue the current task or halt."
+    print_result({"ready_now": ready_ids}, required_action)
+
+
+def exec_show_task(args):
+    bundle = load_bundle()
+    task = find_task(bundle, args.task_id)
+    statuses = task_status(bundle)
+    records = recorded_evidence_for_task(bundle, args.task_id)
+    print_result(
+        {"task": task, "status": statuses.get(args.task_id), "evidence": records},
+        "Execute the task within its contract, run verification, then record evidence with `co exec evidence add`.",
+    )
+
+
+def exec_status(_args):
+    bundle = load_bundle()
+    groups = status_groups(bundle)
+    ready = ready_tasks(bundle)
+    current_id = bundle["status"].get("current_task")
+    current = None
+    current_view = None
+    allowed = []
+    forbidden = []
+    evidence_state = None
+    if current_id:
+        task = find_task(bundle, current_id)
+        current = {
+            "id": current_id,
+            "title": task.get("title"),
+            "status": task_status(bundle).get(current_id),
+            "next_required_action": f"Continue {current_id} until required evidence is recorded and completion gates pass.",
+        }
+        current_view = {
+            "files": task.get("files"),
+            "verification": task.get("verification"),
+            "acceptance_criteria": task.get("acceptance_criteria"),
+        }
+        expected = [item.get("file") for item in expected_evidence_for_task(task)]
+        recorded = [record.get("artifact") for record in recorded_evidence_for_task(bundle, current_id)]
+        evidence_state = {"required": expected, "recorded": recorded}
+        allowed = [
+            f'co exec evidence add --task {current_id} --step <step-id> --name <file> --command "..." --exit-code <code> --success true|false --stdin',
+            f'co exec repair {current_id} --field <path> --reason "..."',
+            f"co exec complete-task {current_id}",
+            f'co exec halt --kind user_decision|external_environment --task {current_id} --reason "..."',
+        ]
+        forbidden = [
+            f"claim another task while {current_id} is Doing",
+            "finish before final verification is Done",
+            "mark Done without required evidence",
+        ]
+    else:
+        allowed = [f"co exec claim {task['id']}" for task in ready]
+        if can_finish(bundle):
+            allowed.append("co exec finish")
+        forbidden = ["claim a task that is not ready", "finish before all tasks and final verification are Done"]
+    data = {
+        "active_plan": {"id": bundle["plan_id"], "dir": str(bundle["plan_dir"])},
+        "phase": bundle["status"].get("phase"),
+        "can_finish": can_finish(bundle),
+        "current_task": current,
+        "progress": {**groups, "ready_now": [task["id"] for task in ready]},
+        "allowed_now": allowed,
+        "forbidden_now": forbidden,
+        "current_task_view": current_view,
+        "evidence_state": evidence_state,
+        "halt": bundle["status"].get("halt"),
+        "drift_guard": {
+            "message": "Do not switch tasks or widen scope. Complete or repair the current task unless halt is required."
+        },
+    }
+    phase = bundle["status"].get("phase")
+    if phase == "ready_for_exec":
+        required_action = "Run `co exec start`."
+        next_command = "co exec start"
+    elif phase == "executing" and current_id:
+        required_action = "Continue current_task; record evidence, repair, complete, or halt using allowed_now."
+        next_command = None
+    elif phase == "executing" and ready:
+        required_action = "Claim exactly one task from progress.ready_now."
+        next_command = f"co exec claim {ready[0]['id']}"
+    elif phase == "executing" and can_finish(bundle):
+        required_action = "Run `co exec finish`."
+        next_command = "co exec finish"
+    elif phase == "halted":
+        required_action = "Stop execution and report halt.kind and halt.reason to the user."
+        next_command = None
+    elif phase == "complete":
+        required_action = "Report final completion."
+        next_command = None
+    else:
+        required_action = "Follow allowed_now and forbidden_now; do not mutate bundle YAML directly."
+        next_command = None
+    print_result(data, required_action, next_command)
+
+
+def exec_claim(args):
+    bundle = load_bundle()
+    if bundle["status"].get("phase") != "executing":
+        raise ExError("tasks can be claimed only while phase is executing")
+    if bundle["status"].get("current_task"):
+        raise ExError(f"current task is already Doing: {bundle['status']['current_task']}")
+    task = find_task(bundle, args.task_id)
+    if task not in ready_tasks(bundle):
+        raise ExError(f"task is not ready: {args.task_id}")
+    status = bundle["status"]
+    status["current_task"] = args.task_id
+    status["tasks"][args.task_id] = "Doing"
+    write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    append_event(
+        bundle["plan_dir"],
+        "task_claimed",
+        f"{args.task_id} moved from Todo to Doing.",
+        [f"status.yaml#tasks.{args.task_id}", "status.yaml#current_task"],
+        f"co exec claim {args.task_id}",
+    )
+    print_result(
+        {"task": args.task_id, "status": "Doing"},
+        "Execute the claimed task, run verification, and record evidence with `co exec evidence add`.",
+    )
+
+
+def safe_evidence_name(name):
+    if os.path.isabs(name):
+        raise ExError("--name must be relative to evidence/")
+    if ".." in Path(name).parts:
+        raise ExError("--name must not contain ..")
+    return name
+
+
+def exec_evidence_add(args):
+    bundle = load_bundle()
+    task = find_task(bundle, args.task)
+    task_step(task, args.step)
+    if task_status(bundle).get(args.task) != "Doing":
+        raise ExError("evidence can be added only for a Doing task")
+    name = safe_evidence_name(args.name)
+    artifact = Path("evidence") / name
+    artifact_path = bundle["plan_dir"] / artifact
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(read_stdin(), encoding="utf-8")
+
+    evidence = bundle["evidence"]
+    records = evidence.setdefault("records", [])
+    record = {
+        "id": next_id(records, "V"),
+        "task_id": args.task,
+        "step_id": args.step,
+        "command": args.command,
+        "exit_code": args.exit_code,
+        "success": normalize_bool(args.success),
+        "artifact": str(artifact),
+        "satisfies": args.satisfies or [],
+    }
+    records.append(record)
+    write_yaml(bundle["plan_dir"] / "evidence.yaml", evidence)
+    append_event(
+        bundle["plan_dir"],
+        "evidence_recorded",
+        f"Recorded evidence for {args.task}/{args.step}.",
+        ["evidence.yaml", str(artifact)],
+        f"co exec evidence add --task {args.task} --step {args.step}",
+    )
+    if record["success"]:
+        required_action = "If acceptance criteria are satisfied and all required evidence is recorded, run `co exec complete-task <task-id>`; otherwise continue the task."
+        next_command = f"co exec complete-task {args.task}"
+    else:
+        required_action = "Keep the task Doing; repair or fix within contract, rerun verification, and record new evidence."
+        next_command = None
+    print_result({"record": record}, required_action, next_command)
+
+
+def set_nested(data, path, value=None, add=False, remove=False):
+    parts = path.split(".")
+    if parts[0] not in CONTRACT_REPAIR_ROOTS:
+        raise ExError("repair field must start with files, implementation_notes, or verification")
+    target = data
+    for part in parts[:-1]:
+        if not isinstance(target, dict):
+            raise ExError(f"cannot traverse field path: {path}")
+        target = target.setdefault(part, {})
+    leaf = parts[-1]
+    if add:
+        existing = target.setdefault(leaf, [])
+        if not isinstance(existing, list):
+            raise ExError(f"field is not a list: {path}")
+        existing.append(value)
+    elif remove:
+        existing = target.get(leaf)
+        if not isinstance(existing, list):
+            raise ExError(f"field is not a list: {path}")
+        target[leaf] = [item for item in existing if item != value]
+    else:
+        target[leaf] = value
+
+
+def exec_repair(args):
+    bundle = load_bundle()
+    task = find_task(bundle, args.task_id)
+    if task_status(bundle).get(args.task_id) != "Doing":
+        raise ExError("repair is allowed only for a Doing task")
+    if args.set_value is None and args.add_value is None and args.remove_value is None:
+        raise ExError("repair requires one of --set, --add, or --remove")
+    tasks_data = bundle["tasks"]
+    task = find_task(bundle, args.task_id)
+    if args.set_value is not None:
+        set_nested(task, args.field, parse_yaml_value(args.set_value))
+    elif args.add_value is not None:
+        set_nested(task, args.field, parse_yaml_value(args.add_value), add=True)
+    else:
+        set_nested(task, args.field, parse_yaml_value(args.remove_value), remove=True)
+    validate_tasks(tasks_data)
+    write_yaml(bundle["plan_dir"] / "tasks.yaml", tasks_data)
+    event = append_event(
+        bundle["plan_dir"],
+        "task_repaired",
+        f"Repaired {args.task_id} field {args.field}.",
+        [f"tasks.yaml#{args.task_id}.{args.field}"],
+        f"co exec repair {args.task_id}",
+    )
+    note = append_note(
+        bundle["plan_dir"],
+        "repair",
+        f"Repaired {args.task_id} field {args.field}.",
+        args.reason,
+        [f"tasks.yaml#{args.task_id}.{args.field}"],
+        event["id"],
+    )
+    print_result(
+        {"event": event, "note": note},
+        "Rerun the relevant verification command and record evidence.",
+    )
+
+
+def exec_complete_task(args):
+    bundle = load_bundle()
+    status = bundle["status"]
+    task = find_task(bundle, args.task_id)
+    if status.get("current_task") != args.task_id or task_status(bundle).get(args.task_id) != "Doing":
+        raise ExError(f"task is not currently Doing: {args.task_id}")
+    missing = required_evidence_missing(bundle, task)
+    if missing:
+        raise ExError("required evidence missing: " + ", ".join(missing))
+    status["tasks"][args.task_id] = "Done"
+    status["current_task"] = None
+    write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    append_event(
+        bundle["plan_dir"],
+        "task_completed",
+        f"{args.task_id} moved from Doing to Done.",
+        [f"status.yaml#tasks.{args.task_id}", "status.yaml#current_task"],
+        f"co exec complete-task {args.task_id}",
+    )
+    print_result(
+        {"task": args.task_id, "status": "Done"},
+        "Run `co exec status` to choose the next ready task or finish.",
+        "co exec status",
+    )
+
+
+def exec_halt(args):
+    bundle = load_bundle()
+    if args.kind not in {"user_decision", "external_environment"}:
+        raise ExError("halt kind must be user_decision or external_environment")
+    if args.task:
+        find_task(bundle, args.task)
+    status = bundle["status"]
+    status["phase"] = "halted"
+    status["halt"] = {"kind": args.kind, "task": args.task, "reason": args.reason}
+    write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    event = append_event(
+        bundle["plan_dir"],
+        "task_halted",
+        f"Execution halted: {args.reason}",
+        ["status.yaml#phase", "status.yaml#halt"],
+        "co exec halt",
+    )
+    note = append_note(
+        bundle["plan_dir"],
+        "halt",
+        f"Execution halted: {args.reason}",
+        args.kind,
+        ["status.yaml#halt"],
+        event["id"],
+    )
+    print_result(
+        {"phase": "halted", "halt": status["halt"], "event": event, "note": note},
+        "Stop execution and report the halt reason to the user.",
+    )
+
+
+def exec_finish(_args):
+    bundle = load_bundle()
+    if bundle["status"].get("phase") == "halted":
+        raise ExError("cannot finish while phase is halted")
+    if not can_finish(bundle):
+        remaining = [task_id for task_id, state in task_status(bundle).items() if state != "Done"]
+        finals = [task["id"] for task in final_tasks(bundle) if task_status(bundle).get(task["id"]) != "Done"]
+        raise ExError(f"cannot finish; remaining={remaining}, final_verification_remaining={finals}")
+    status = bundle["status"]
+    status["phase"] = "complete"
+    status["current_task"] = None
+    write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    append_event(
+        bundle["plan_dir"],
+        "phase_changed",
+        "Execution completed.",
+        ["status.yaml#phase"],
+        "co exec finish",
+    )
+    print_result({"phase": "complete"}, "Report final completion to the user.")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="co")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    current = sub.add_parser("current")
+    current.set_defaults(func=command_current)
+
+    show = sub.add_parser("show")
+    show.add_argument("--file", required=True, choices=["draft", "plan", "tasks", "interview", "status", "notes", "events", "evidence"])
+    show.set_defaults(func=command_show)
+
+    review_context = sub.add_parser("review-context")
+    review_context.set_defaults(func=command_review_context)
+
+    doctor = sub.add_parser("doctor")
+    doctor.set_defaults(func=command_doctor)
+
+    planner = sub.add_parser("planner")
+    planner_sub = planner.add_subparsers(dest="planner_command", required=True)
+
+    init = planner_sub.add_parser("init")
+    init.add_argument("--plan-id", required=True)
+    init.add_argument("--title", required=True)
+    init.add_argument("--replace", action="store_true")
+    init.set_defaults(func=planner_init)
+
+    interview = planner_sub.add_parser("interview")
+    interview_sub = interview.add_subparsers(dest="interview_command", required=True)
+    interview_status = interview_sub.add_parser("status")
+    interview_status.set_defaults(func=planner_interview_status)
+    interview_ask_next = interview_sub.add_parser("ask-next")
+    interview_ask_next.add_argument("--runner", choices=["codex"], required=True)
+    interview_ask_next.set_defaults(func=planner_interview_ask_next)
+    interview_score = interview_sub.add_parser("score")
+    interview_score.add_argument("--runner", choices=["codex"], required=True)
+    interview_score.add_argument("--mode", choices=["auto", "greenfield", "brownfield"], default="auto")
+    interview_score.set_defaults(func=planner_interview_score)
+    interview_ask = interview_sub.add_parser("ask")
+    interview_ask.add_argument("--route", choices=sorted(INTERVIEW_USER_ROUTES), required=True)
+    interview_ask.add_argument("--track", choices=INTERVIEW_REQUIRED_TRACKS, required=True)
+    interview_ask.add_argument("--question", required=True)
+    interview_ask.set_defaults(func=planner_interview_ask)
+    interview_record = interview_sub.add_parser("record")
+    interview_record.add_argument("--route", choices=sorted(INTERVIEW_ROUTES), required=True)
+    interview_record.add_argument("--track", choices=INTERVIEW_REQUIRED_TRACKS, required=True)
+    interview_record.add_argument("--question", required=True)
+    interview_record.add_argument("--answer", required=True)
+    interview_record.add_argument("--source", required=True)
+    interview_record.set_defaults(func=planner_interview_record)
+    interview_track = interview_sub.add_parser("track")
+    interview_track_sub = interview_track.add_subparsers(dest="track_action", required=True)
+    interview_track_close = interview_track_sub.add_parser("close")
+    interview_track_close.add_argument("track", choices=INTERVIEW_REQUIRED_TRACKS)
+    interview_track_close.add_argument("--summary", required=True)
+    interview_track_close.set_defaults(func=planner_interview_track)
+    interview_track_open = interview_track_sub.add_parser("open")
+    interview_track_open.add_argument("track", choices=INTERVIEW_REQUIRED_TRACKS)
+    interview_track_open.add_argument("--reason", required=True)
+    interview_track_open.set_defaults(func=planner_interview_track)
+    interview_closure_check = interview_sub.add_parser("closure-check")
+    interview_closure_check.add_argument("check", choices=INTERVIEW_CLOSURE_CHECKS)
+    interview_closure_check.add_argument("--summary", required=True)
+    interview_closure_check.set_defaults(func=planner_interview_closure_check)
+    interview_blocker = interview_sub.add_parser("blocker")
+    interview_blocker_sub = interview_blocker.add_subparsers(dest="blocker_action", required=True)
+    interview_blocker_add = interview_blocker_sub.add_parser("add")
+    interview_blocker_add.add_argument("--reason", required=True)
+    interview_blocker_add.set_defaults(func=planner_interview_blocker)
+    interview_blocker_clear = interview_blocker_sub.add_parser("clear")
+    interview_blocker_clear.add_argument("--reason", required=True)
+    interview_blocker_clear.set_defaults(func=planner_interview_blocker)
+    interview_close = interview_sub.add_parser("close")
+    interview_close.add_argument("--summary", required=True)
+    interview_close.set_defaults(func=planner_interview_close)
+
+    generate_skeleton = planner_sub.add_parser("generate-skeleton")
+    generate_skeleton.set_defaults(func=planner_generate_skeleton)
+
+    review = planner_sub.add_parser("review")
+    review_sub = review.add_subparsers(dest="review_command", required=True)
+    review_run = review_sub.add_parser("run")
+    review_run.add_argument("--runner", choices=["codex"], required=True)
+    review_run.add_argument("--stage", choices=["pre-draft"], required=True)
+    review_run.set_defaults(func=planner_review_run)
+    review_status = review_sub.add_parser("status")
+    review_status.set_defaults(func=planner_review_status)
+
+    approve = planner_sub.add_parser("approve-draft")
+    approve.add_argument("--comment", default="")
+    approve.set_defaults(func=planner_approve_draft)
+
+    finalize = planner_sub.add_parser("finalize")
+    finalize.set_defaults(func=planner_finalize)
+
+    validate = planner_sub.add_parser("validate")
+    validate.set_defaults(func=planner_validate)
+
+    note = sub.add_parser("note")
+    note_sub = note.add_subparsers(dest="note_command", required=True)
+    note_append_parser = note_sub.add_parser("append")
+    note_append_parser.add_argument("kind", choices=sorted(NOTE_KINDS - {"repair", "halt"}))
+    note_append_parser.add_argument("--text", required=True)
+    note_append_parser.add_argument("--why", required=True)
+    note_append_parser.add_argument("--affects", action="append")
+    note_append_parser.add_argument("--source", required=True)
+    note_append_parser.set_defaults(func=note_append)
+    note_list_parser = note_sub.add_parser("list")
+    note_list_parser.add_argument("--kind", choices=sorted(NOTE_KINDS))
+    note_list_parser.set_defaults(func=note_list)
+
+    exec_parser = sub.add_parser("exec")
+    exec_sub = exec_parser.add_subparsers(dest="exec_command", required=True)
+
+    start = exec_sub.add_parser("start")
+    start.set_defaults(func=exec_start)
+    status = exec_sub.add_parser("status")
+    status.set_defaults(func=exec_status)
+    ready = exec_sub.add_parser("ready")
+    ready.set_defaults(func=exec_ready)
+    show_task = exec_sub.add_parser("show-task")
+    show_task.add_argument("task_id")
+    show_task.set_defaults(func=exec_show_task)
+    claim = exec_sub.add_parser("claim")
+    claim.add_argument("task_id")
+    claim.set_defaults(func=exec_claim)
+    evidence = exec_sub.add_parser("evidence")
+    evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
+    evidence_add = evidence_sub.add_parser("add")
+    evidence_add.add_argument("--task", required=True)
+    evidence_add.add_argument("--step", required=True)
+    evidence_add.add_argument("--name", required=True)
+    evidence_add.add_argument("--command", required=True)
+    evidence_add.add_argument("--exit-code", type=int, required=True)
+    evidence_add.add_argument("--success", choices=["true", "false"], required=True)
+    evidence_add.add_argument("--satisfies", action="append")
+    evidence_add.add_argument("--stdin", action="store_true", required=True)
+    evidence_add.set_defaults(func=exec_evidence_add)
+    repair = exec_sub.add_parser("repair")
+    repair.add_argument("task_id")
+    repair.add_argument("--field", required=True)
+    repair.add_argument("--reason", required=True)
+    repair.add_argument("--set", dest="set_value")
+    repair.add_argument("--add", dest="add_value")
+    repair.add_argument("--remove", dest="remove_value")
+    repair.set_defaults(func=exec_repair)
+    complete = exec_sub.add_parser("complete-task")
+    complete.add_argument("task_id")
+    complete.set_defaults(func=exec_complete_task)
+    halt = exec_sub.add_parser("halt")
+    halt.add_argument("--kind", choices=["user_decision", "external_environment"], required=True)
+    halt.add_argument("--task")
+    halt.add_argument("--reason", required=True)
+    halt.set_defaults(func=exec_halt)
+    finish = exec_sub.add_parser("finish")
+    finish.set_defaults(func=exec_finish)
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        args.func(args)
+    except ExError as exc:
+        sys.stdout.write("ok: false\n")
+        sys.stdout.write("error: " + repr(str(exc)) + "\n")
+        sys.stdout.write(
+            "required_action: 'Read error, satisfy the blocked gate or fix command input, then rerun the appropriate co command.'\n"
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,289 @@
+# Plan Bundle Schema
+
+Each active plan is selected by `.agents/plan/exec.yaml` and stored under `.agents/plan/{plan-id}/`.
+Use `~/.codex/skills/coplan/scripts/co` for CLI-owned state. Direct edits are allowed only for `draft.md`, `plan.yaml`, and `tasks.yaml` after `co planner generate-skeleton`.
+
+Review gate state is stored in `status.yaml.review`.
+
+## Directory Layout
+
+```text
+.agents/plan/
+  exec.yaml
+  {plan-id}/
+    draft.md
+    plan.yaml
+    tasks.yaml
+    interview.yaml
+    status.yaml
+    notes.yaml
+    events.yaml
+    evidence.yaml
+    evidence/
+```
+
+## `draft.md`
+
+`draft.md` is the user-reviewed planning surface. It is not the execution contract, but it must match `plan.yaml` and `tasks.yaml`.
+
+Rules:
+
+- `co planner init` creates a placeholder.
+- `co planner generate-skeleton` replaces the placeholder after interview close.
+- The planner may directly patch `draft.md`.
+- Approval is stored through `co planner approve-draft`.
+- `co planner approve-draft`, `co planner validate`, and `co planner finalize` fail if `draft.md` is empty or still contains the init placeholder.
+
+## `plan.yaml`
+
+`plan.yaml` is the compact execution strategy. The planner may directly patch it after skeleton generation.
+
+Required fields:
+
+- `title`
+- `goal`
+- `context`
+- `non_goals`
+- `constraints`
+- `success_criteria`
+- `verification_policy`
+- `execution_strategy`
+- `stop_conditions`
+
+`plan.yaml` stores only the required fields above. Task progress, evidence, and review gate state live in CLI-owned files.
+
+## `tasks.yaml`
+
+`tasks.yaml` is the static execution contract. The planner may directly patch it after skeleton generation. It must not contain task status.
+
+Required task fields:
+
+- `id`
+- `kind`: `execution`, `checkpoint`, or `final_verification`
+- `title`
+- `depends_on`
+- `start_when.description`
+- `files.primary`
+- `files.generated_incidental`
+- `context`
+- `must_do`
+- `must_not_do`
+- `implementation_notes`
+- `verification.evidence_required`
+- `verification.steps`
+- `acceptance_criteria`
+- `expected_evidence`
+- `reopen_when`
+
+Every verification step requires `id`, `command`, and `success_signal`.
+Every expected evidence item requires `step_id` and a relative `file` under `evidence/`.
+At least one task must use `kind: final_verification`.
+Task dependencies must point to known task ids and must not form a cycle.
+
+## `interview.yaml`
+
+`interview.yaml` is the CLI-owned Socratic ledger. Do not edit it directly.
+
+```yaml
+status: open
+non_user_answer_streak: 0
+required_tracks:
+  scope:
+    status: open
+    summary: ''
+  non_goals:
+    status: open
+    summary: ''
+  outputs:
+    status: open
+    summary: ''
+  verification:
+    status: open
+    summary: ''
+  constraints:
+    status: open
+    summary: ''
+  stop_conditions:
+    status: open
+    summary: ''
+rounds: []
+pending_user_question: null
+agent_runs: []
+ambiguity:
+  latest: null
+  history: []
+closure:
+  ready: false
+  summary: ''
+  material_blockers: []
+  checks:
+    desired_output_explicit:
+      passed: false
+      summary: ''
+    user_tradeoffs_explicit:
+      passed: false
+      summary: ''
+    executor_determinism:
+      passed: false
+      summary: ''
+    verification_proves_behavior:
+      passed: false
+      summary: ''
+    no_material_questions:
+      passed: false
+      summary: ''
+```
+
+Valid routes:
+
+- `code_fact`: `from-code...`
+- `user_decision`: `from-user...`
+- `code_plus_decision`: `from-user...`
+- `research_confirmation`: `from-research...`
+
+Ambiguity score entries use:
+
+```yaml
+id: S1
+project_mode: brownfield
+threshold: 0.2
+weighted_clarity: 0.82
+ambiguity: 0.18
+ready: true
+floor_failures: []
+components:
+  goal_clarity:
+    clarity_score: 0.9
+    weight: 0.35
+    justification: Goal names the target behavior.
+weakest_dimension: context_clarity
+recommended_followup:
+  route: code_plus_decision
+  track: verification
+  question: Which repo-native check should prove this behavior?
+round_count: 6
+scoring_temperature_intent: 0.1
+model: gpt-5.5
+```
+
+`co planner interview close` requires:
+
+- every required track closed
+- no unanswered pending user question
+- every required track has at least one round
+- `scope`, `outputs`, and `verification` have user-judgment rounds
+- closure checks passed
+- material blockers empty
+- latest ambiguity score is fresh for the current round count
+- `ambiguity <= 0.2`
+- clarity floors pass
+
+## `status.yaml`
+
+`status.yaml` stores only current state and pre-draft review gate state.
+
+```yaml
+phase: drafting
+review:
+  status: not_run
+  stage: pre-draft
+  required_reviewers:
+    - contract_reviewer
+    - verification_reviewer
+  passed_reviewers: []
+  last_run_id: null
+  fingerprint: null
+current_task: null
+tasks:
+  T1: Todo
+  FV1: Todo
+halt: null
+```
+
+Valid phases:
+
+- `drafting`
+- `draft_review`
+- `planning`
+- `ready_for_exec`
+- `executing`
+- `halted`
+- `complete`
+
+Valid review statuses: `not_run`, `passed`, `failed`.
+Valid task states: `Todo`, `Doing`, `Done`.
+Use `halt` only for `user_decision` or `external_environment`.
+
+## `notes.yaml`
+
+`notes.yaml` is append-only semantic memory. It records review findings, decisions, risks, revisions, repairs, and halt notes. Do not edit it directly.
+
+```yaml
+entries:
+  - id: N1
+    kind: risk
+    text: verification_reviewer FAIL: final verification does not prove browser behavior.
+    why: Codex CLI pre-draft plan review.
+    affects:
+      - plan.yaml
+      - tasks.yaml
+    source: co planner review run
+```
+
+## `events.yaml`
+
+`events.yaml` is append-only transition history owned by `co`. It records init, interview scoring, skeleton generation, review, approval, finalize, task execution, evidence, repair, halt, and finish.
+
+## `evidence.yaml`
+
+`evidence.yaml` is the append-only evidence manifest owned by `co exec evidence add`.
+Loose files under `evidence/` are not enough; a task is not complete until required artifacts are recorded in `evidence.yaml`.
+
+## Read Commands
+
+```bash
+co current
+co show --file draft|plan|tasks|interview|status|notes|events|evidence
+co exec status
+co exec ready
+co exec show-task <task-id>
+co review-context
+```
+
+`co review-context` includes the Markdown draft body plus `plan.yaml`, `tasks.yaml`, `interview.yaml`, current state, notes, events, evidence, and git context.
+
+## Write Commands
+
+Planner:
+
+```bash
+co planner init --plan-id <id> --title "<title>"
+co planner interview status
+co planner interview ask-next --runner codex
+co planner interview score --runner codex --mode auto|greenfield|brownfield
+co planner interview ask --route user_decision|code_plus_decision --track <track> --question "..."
+co planner interview record --route code_fact|user_decision|code_plus_decision|research_confirmation --track <track> --question "..." --answer "..." --source "..."
+co planner interview track close <track> --summary "..."
+co planner interview track open <track> --reason "..."
+co planner interview closure-check desired_output_explicit|user_tradeoffs_explicit|executor_determinism|verification_proves_behavior|no_material_questions --summary "..."
+co planner interview blocker add|clear --reason "..."
+co planner interview close --summary "..."
+co planner generate-skeleton
+co planner validate
+co planner review run --runner codex --stage pre-draft
+co planner review status
+co planner approve-draft --comment "<summary>"
+co planner finalize
+```
+
+Executor:
+
+```bash
+co exec start
+co exec claim <task-id>
+co exec evidence add --task <task-id> --step <step-id> --name <file> --command "<command>" --exit-code <code> --success true|false --stdin
+co exec repair <task-id> --field <path> --reason "<reason>" --set|--add|--remove <yaml-value>
+co exec complete-task <task-id>
+co exec halt --kind user_decision|external_environment --task <task-id> --reason "<reason>"
+co exec finish
+```

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Coexec"
+  short_description: "활성 YAML plan-execute 번들을 `co`로 실행"
+
+policy:
+  allow_implicit_invocation: false
