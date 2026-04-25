@@ -14,6 +14,7 @@ description: active plan bundle의 current task를 `co.py flow`로 실행하는 
 - 실행 시작과 재개는 `co.py flow next`로 한다.
 - 모든 `co.py flow` 응답은 YAML이며 `contract_version`, `mode`, `phase`, `root_action`을 확인한다.
 - Root agent는 `root_action.task`에 있는 current task만 구현한다.
+- `root_action.plan_seed`는 승인된 전역 계약이다. Current task와 충돌하지 않는지 확인하고, scope, non-goals, constraints, success criteria, verification expectations, execution boundaries를 바꾸는 선택이 필요하면 halt한다.
 - 검증 명령은 root agent가 실제 shell에서 실행한다.
 - 검증 output, exit code, success 여부는 `co.py flow evidence`로 기록한다.
 - 실패 후 수정이 필요하면 현재 task 범위 안에서만 고친다.
@@ -46,16 +47,28 @@ root_action:
   task:
     id: task-id
     title: task title
+  plan_seed:
+    seed:
+      goal: approved goal
+      constraints: []
+      non_goals: []
+      success_criteria: []
+      verification_expectations: []
+      execution_boundaries: []
   status:
     id: task-id
     status: Doing
   task_view:
     files:
-      - path/to/file
+      primary:
+        - path/to/file
+      generated_incidental: []
     verification:
-      - id: verification-step-id
-        command: verification command
-        success_signal: expected signal
+      evidence_required: true
+      steps:
+        - id: verification-step-id
+          command: verification command
+          success_signal: expected signal
     acceptance_criteria:
       - expected behavior
   evidence_state:
@@ -115,7 +128,7 @@ co.py flow evidence
 
 ## Evidence 기록
 
-Verification은 `root_action.task_view.verification[*]`에 있는 step을 기준으로 실행한다.
+Verification은 `root_action.task_view.verification.steps[*]`에 있는 step을 기준으로 실행한다.
 `--step`에는 실행한 verification item의 `id`를 넣는다.
 `--command`에는 실제 실행한 shell command를 그대로 넣는다.
 `--success true`는 exit code와 output이 해당 step의 `success_signal`을 만족할 때만 쓴다.
@@ -124,7 +137,7 @@ Exit code를 잃지 않도록 output과 code를 먼저 잡은 뒤 evidence로 �
 
 ```bash
 set +e
-command='<verification command from root_action.task_view.verification[*].command>'
+command='<verification command from root_action.task_view.verification.steps[*].command>'
 output="$(sh -lc "$command" 2>&1)"
 code=$?
 printf '%s\n' "$output" | ~/.codex/skills/coplan/scripts/co.py flow evidence \
@@ -159,12 +172,12 @@ Task metadata가 현재 구현 현실과 맞지 않지만 사용자-facing contr
 ## 금지 사항
 
 - Task를 직접 claim, complete, skip, reorder, finish하지 않는다.
-- `plan.yaml`, `tasks.yaml`, `status.yaml`, `notes.yaml`, `evidence.yaml`을 직접 수정하지 않는다.
+- `plan_seed.yaml`, `tasks.yaml`, `status.yaml`, `notes.yaml`, `evidence.yaml`을 직접 수정하지 않는다.
 - 현재 task 밖의 source file이나 behavior를 임의로 넓히지 않는다.
 - Acceptance criteria, non-goals, dependency, task order를 바꾸지 않는다.
 
 ## 보고 기준
 
-- `report_complete`이면 최종 보고 첫 줄은 정확히 `최종 완료 🎉`로 쓴다.
+- `report_complete`이면 최종 보고 첫 줄은 정확히 `최종 완료`로 쓴다.
 - 중간에 멈추면 현재 `root_action.type` 또는 `root_action.halt`를 보고한다.
 - 실행한 검증 명령과 성공/실패 결과를 짧게 보고한다.

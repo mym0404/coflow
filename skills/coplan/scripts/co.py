@@ -20,9 +20,8 @@ BOOTSTRAP_DIR = Path.home() / ".cache" / "codex-co"
 BOOTSTRAP_VENV = BOOTSTRAP_DIR / "venv"
 BOOTSTRAP_PYTHON = BOOTSTRAP_VENV / "bin" / "python"
 VALID_PHASES = {
-    "drafting",
-    "draft_review",
     "planning",
+    "seed_review",
     "ready_for_exec",
     "executing",
     "halted",
@@ -30,10 +29,11 @@ VALID_PHASES = {
 }
 TASK_STATES = {"Todo", "Doing", "Done"}
 REVIEW_STATUSES = {"not_run", "passed", "failed"}
-REVIEW_STAGES = {"pre-draft"}
+REVIEW_STAGES = {"bundle"}
 REQUIRED_REVIEWERS = ("contract_reviewer", "verification_reviewer")
 INTERVIEW_STATUSES = {"open", "closed"}
 INTERVIEW_TRACK_STATUSES = {"open", "closed"}
+SEED_REVIEW_STATUSES = {"not_presented", "presented", "approved"}
 INTERVIEW_ROUTE_ORDER = (
     "code_fact",
     "user_decision",
@@ -75,7 +75,7 @@ INTERVIEW_QUESTION_PURPOSES = {
     INTERVIEW_CLOSURE_AUDIT_PURPOSE,
 }
 INTERVIEW_CLOSURE_CHECK_SUMMARIES = {
-    "desired_output_explicit": "Seed captures the intended output before drafting.",
+    "desired_output_explicit": "Seed captures the intended output before task authoring.",
     "user_tradeoffs_explicit": "Material user-owned tradeoffs are settled or intentionally deferred.",
     "closure_audit_passed": "Seed Closer audit passed before bundle authoring.",
     "executor_determinism": "Executor inputs are deterministic enough for a static plan.",
@@ -133,18 +133,10 @@ CODEX_AGENT_WRAPPER_MAGIC_HEADERS = (
 )
 NOTE_KINDS = {"discovery", "decision", "risk", "revision", "repair", "halt"}
 CONTRACT_REPAIR_ROOTS = {"files", "implementation_notes", "verification"}
-DRAFT_PLACEHOLDER_MARKER = "<!-- EX_DRAFT_PLACEHOLDER -->"
-DRAFT_APPROVED_PHASES = {
-    "planning",
-    "ready_for_exec",
-    "executing",
-    "halted",
-    "complete",
-}
 FLOW_CONTRACT_VERSION = "1"
 FLOW_ROOT_ACTION_TYPES = {
     "ask_user",
-    "present_draft",
+    "present_plan_seed",
     "execute_task",
     "repair_task",
     "report_halt",
@@ -376,11 +368,9 @@ def summarize_codex_output(role, output):
     if role == "bundle_author":
         tasks = output.get("tasks", {}).get("tasks", []) if isinstance(output.get("tasks"), dict) else []
         return {
-            "draft_bytes": len(str(output.get("draft_markdown", "")).encode("utf-8")),
-            "plan_title": output.get("plan", {}).get("title") if isinstance(output.get("plan"), dict) else None,
             "task_count": len(tasks) if isinstance(tasks, list) else None,
         }
-    if role == "draft_feedback":
+    if role in {"seed_feedback", "seed_reviser"}:
         return {
             "action": output.get("action"),
             "track": output.get("track"),
@@ -674,11 +664,8 @@ def active_plan():
 
 def file_path(plan_dir, name):
     mapping = {
-        "draft": "draft.md",
-        "plan": "plan.yaml",
         "tasks": "tasks.yaml",
         "plan-seed": "plan_seed.yaml",
-        "planning-context": "planning_context.yaml",
         "interview": "interview.yaml",
         "status": "status.yaml",
         "notes": "notes.yaml",
@@ -765,15 +752,11 @@ def exec_notes_view(bundle, current_id):
 
 def load_bundle():
     plan_id, plan_dir = active_plan()
-    planning_context_path = plan_dir / "planning_context.yaml"
     plan_seed_path = plan_dir / "plan_seed.yaml"
     return {
         "plan_id": plan_id,
         "plan_dir": plan_dir,
-        "draft": read_text_file(plan_dir / "draft.md"),
-        "plan": load_yaml(plan_dir / "plan.yaml"),
         "tasks": load_yaml(plan_dir / "tasks.yaml"),
-        "planning_context": load_yaml(planning_context_path) if planning_context_path.exists() else None,
         "plan_seed": load_yaml(plan_seed_path) if plan_seed_path.exists() else None,
         "interview": load_yaml(plan_dir / "interview.yaml"),
         "status": load_yaml(plan_dir / "status.yaml"),
@@ -820,36 +803,6 @@ def validate_plan_id(plan_id):
         raise ExError("plan-id must be stable kebab-case")
 
 
-def validate_draft_markdown(plan_dir):
-    path = plan_dir / "draft.md"
-    text = read_text_file(path)
-    if not text.strip():
-        raise ExError("draft.md must not be empty")
-    if DRAFT_PLACEHOLDER_MARKER in text:
-        raise ExError("draft.md still contains the init placeholder")
-    return text
-
-
-def require_draft_approved(status):
-    if status.get("phase") not in DRAFT_APPROVED_PHASES:
-        raise ExError("draft.md must be approved before this command")
-
-
-def validate_plan(data):
-    required = [
-        "title",
-        "goal",
-        "context",
-        "non_goals",
-        "constraints",
-        "success_criteria",
-        "verification_policy",
-        "execution_strategy",
-        "stop_conditions",
-    ]
-    require_fields(data, required, "plan.yaml")
-
-
 def default_closure_audit():
     return {
         "status": "not_run",
@@ -878,6 +831,12 @@ def default_interview(initial_context=""):
         "completion_candidate_streak": 0,
         "closure_audit": default_closure_audit(),
         "deferred_items": [],
+        "seed_review": {
+            "status": "not_presented",
+            "fingerprint": None,
+            "comment": "",
+            "feedback": [],
+        },
         "closure": {
             "ready": False,
             "summary": "",
@@ -896,6 +855,10 @@ def validate_interview(data):
     data.setdefault("completion_candidate_streak", 0)
     data.setdefault("closure_audit", default_closure_audit())
     data.setdefault("deferred_items", [])
+    data.setdefault(
+        "seed_review",
+        {"status": "not_presented", "fingerprint": None, "comment": "", "feedback": []},
+    )
     require_fields(
         data,
         [
@@ -911,6 +874,7 @@ def validate_interview(data):
             "completion_candidate_streak",
             "closure_audit",
             "deferred_items",
+            "seed_review",
             "closure",
         ],
         "interview.yaml",
@@ -985,6 +949,18 @@ def validate_interview(data):
         raise ExError("interview.yaml completion_candidate_streak must be a non-negative integer")
     if not isinstance(data["deferred_items"], list):
         raise ExError("interview.yaml deferred_items must be a list")
+    seed_review = data["seed_review"]
+    if not isinstance(seed_review, dict):
+        raise ExError("interview.yaml seed_review must be a mapping")
+    require_fields(seed_review, ["status", "fingerprint", "comment", "feedback"], "interview.yaml seed_review")
+    if seed_review["status"] not in SEED_REVIEW_STATUSES:
+        raise ExError("interview.yaml seed_review.status is invalid")
+    if seed_review["fingerprint"] is not None and not isinstance(seed_review["fingerprint"], str):
+        raise ExError("interview.yaml seed_review.fingerprint must be a string or null")
+    if not isinstance(seed_review["comment"], str):
+        raise ExError("interview.yaml seed_review.comment must be a string")
+    if not isinstance(seed_review["feedback"], list):
+        raise ExError("interview.yaml seed_review.feedback must be a list")
     ambiguity = data["ambiguity"]
     if not isinstance(ambiguity, dict):
         raise ExError("interview.yaml ambiguity must be a mapping")
@@ -1173,7 +1149,7 @@ def interview_focus_blocker(interview, next_track):
     )
 
 
-def interview_draft_ready(interview):
+def interview_seed_ready(interview):
     validate_interview(interview)
     return (
         interview.get("status") == "closed"
@@ -1186,7 +1162,7 @@ def interview_draft_ready(interview):
 
 def require_interview_closed(plan_dir, action):
     interview = load_yaml(plan_dir / "interview.yaml")
-    if not interview_draft_ready(interview):
+    if not interview_seed_ready(interview):
         open_tracks = interview_open_tracks(interview)
         blockers = interview.get("closure", {}).get("material_blockers", [])
         details = []
@@ -1235,6 +1211,9 @@ def validate_tasks(data):
             raise ExError(f"task {task['id']} must not contain status")
         if task["id"] in ids:
             raise ExError(f"duplicate task id: {task['id']}")
+        for string_field in ["id", "title", "context"]:
+            if not isinstance(task[string_field], str) or not task[string_field].strip():
+                raise ExError(f"task {task['id']} {string_field} must be a non-empty string")
         ids.add(task["id"])
         if task["kind"] not in {"execution", "checkpoint", "final_verification"}:
             raise ExError(f"task {task['id']} has invalid kind")
@@ -1248,6 +1227,8 @@ def validate_tasks(data):
         if not isinstance(start_when, dict):
             raise ExError(f"task {task['id']} start_when must be a mapping")
         require_fields(start_when, ["description"], f"task {task['id']} start_when")
+        if not isinstance(start_when["description"], str) or not start_when["description"].strip():
+            raise ExError(f"task {task['id']} start_when.description must be a non-empty string")
         files = task["files"]
         if not isinstance(files, dict):
             raise ExError(f"task {task['id']} files must be a mapping")
@@ -1259,6 +1240,11 @@ def validate_tasks(data):
         for list_field in ["must_do", "must_not_do", "implementation_notes", "acceptance_criteria", "expected_evidence", "reopen_when"]:
             if not isinstance(task[list_field], list):
                 raise ExError(f"task {task['id']} {list_field} must be a list")
+        for list_field in ["must_do", "acceptance_criteria"]:
+            if not task[list_field]:
+                raise ExError(f"task {task['id']} {list_field} must not be empty")
+            if any(not isinstance(item, str) or not item.strip() for item in task[list_field]):
+                raise ExError(f"task {task['id']} {list_field} items must be non-empty strings")
         verification = task["verification"]
         if not isinstance(verification, dict):
             raise ExError(f"task {task['id']} verification must be a mapping")
@@ -1267,11 +1253,18 @@ def validate_tasks(data):
             raise ExError(f"task {task['id']} verification.evidence_required must be true or false")
         if not isinstance(verification["steps"], list):
             raise ExError(f"task {task['id']} verification.steps must be a list")
+        if not verification["steps"]:
+            raise ExError(f"task {task['id']} verification.steps must not be empty")
+        if verification["evidence_required"] and not task["expected_evidence"]:
+            raise ExError(f"task {task['id']} expected_evidence must not be empty when evidence is required")
         step_ids = set()
         for step in verification["steps"]:
             if not isinstance(step, dict):
                 raise ExError(f"task {task['id']} verification step must be a mapping")
             require_fields(step, ["id", "command", "success_signal"], f"task {task['id']} verification step")
+            for step_field in ["id", "command", "success_signal"]:
+                if not isinstance(step[step_field], str) or not step[step_field].strip():
+                    raise ExError(f"task {task['id']} verification step {step_field} must be a non-empty string")
             if step["id"] in step_ids:
                 raise ExError(f"task {task['id']} has duplicate step id: {step['id']}")
             step_ids.add(step["id"])
@@ -1438,8 +1431,8 @@ def build_planning_context(plan_id, plan_dir, title, interview):
             "floor_failures": latest.get("floor_failures", []),
             "recommended_followup": latest.get("recommended_followup"),
         },
-        "drafting_contract": {
-            "editable_files": ["draft.md", "plan.yaml", "tasks.yaml"],
+        "authoring_contract": {
+            "editable_files": ["tasks.yaml"],
             "required_inputs": required_inputs,
         },
     }
@@ -1448,7 +1441,7 @@ def build_planning_context(plan_id, plan_dir, title, interview):
 def default_review_state():
     return {
         "status": "not_run",
-        "stage": "pre-draft",
+        "stage": "bundle",
         "required_reviewers": list(REQUIRED_REVIEWERS),
         "passed_reviewers": [],
         "last_run_id": None,
@@ -1471,7 +1464,7 @@ def validate_status(data, tasks_data=None):
     if review["status"] not in REVIEW_STATUSES:
         raise ExError("status.yaml review.status must be not_run, passed, or failed")
     if review["stage"] not in REVIEW_STAGES:
-        raise ExError("status.yaml review.stage must be pre-draft")
+        raise ExError("status.yaml review.stage must be bundle")
     if review["required_reviewers"] != list(REQUIRED_REVIEWERS):
         raise ExError("status.yaml review.required_reviewers must match required reviewers")
     if not isinstance(review["passed_reviewers"], list):
@@ -1512,14 +1505,28 @@ def sync_status_tasks(plan_dir, tasks_data):
 
 
 def review_fingerprint(plan_dir):
+    interview = load_yaml(plan_dir / "interview.yaml")
     payload = {
-        "plan": load_yaml(plan_dir / "plan.yaml"),
         "tasks": load_yaml(plan_dir / "tasks.yaml"),
-        "interview": load_yaml(plan_dir / "interview.yaml"),
+        "interview_contract": interview_contract_payload(interview),
         "plan_seed": load_plan_seed(plan_dir) if (plan_dir / "plan_seed.yaml").exists() else None,
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def interview_contract_payload(interview):
+    return {
+        "initial_context": interview.get("initial_context"),
+        "required_tracks": interview.get("required_tracks"),
+        "rounds": interview.get("rounds"),
+        "ambiguity": interview.get("ambiguity"),
+        "ambiguity_ledger": interview.get("ambiguity_ledger"),
+        "completion_candidate_streak": interview.get("completion_candidate_streak"),
+        "closure_audit": interview.get("closure_audit"),
+        "deferred_items": interview.get("deferred_items"),
+        "closure": interview.get("closure"),
+    }
 
 
 def load_plan_seed(plan_dir):
@@ -1619,6 +1626,63 @@ def reset_review_status(plan_dir):
     write_yaml(plan_dir / "status.yaml", status)
 
 
+def reset_seed_review_state(plan_dir, preserve_feedback=False):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    feedback = []
+    if preserve_feedback:
+        existing = interview.get("seed_review", {}).get("feedback", [])
+        feedback = existing if isinstance(existing, list) else []
+    interview["seed_review"] = {
+        "status": "not_presented",
+        "fingerprint": None,
+        "comment": "",
+        "feedback": feedback,
+    }
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+
+
+def mark_seed_review_presented(plan_dir):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    seed_review = interview.setdefault("seed_review", {})
+    seed_review["status"] = "presented"
+    seed_review["fingerprint"] = review_fingerprint(plan_dir)
+    seed_review.setdefault("comment", "")
+    seed_review.setdefault("feedback", [])
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+
+
+def mark_seed_review_approved(plan_dir, comment):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    seed_review = interview.setdefault("seed_review", {})
+    seed_review["status"] = "approved"
+    seed_review["fingerprint"] = review_fingerprint(plan_dir)
+    seed_review["comment"] = comment or "Plan seed approved."
+    seed_review.setdefault("feedback", [])
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+
+
+def append_seed_review_feedback(plan_dir, feedback, classification):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    seed_review = interview.setdefault("seed_review", {})
+    seed_review.setdefault("feedback", []).append(
+        {
+            "id": next_id(seed_review.get("feedback", []), "F"),
+            "action": classification.get("action"),
+            "summary": classification.get("summary", ""),
+            "feedback": feedback,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+    seed_review["status"] = "presented"
+    seed_review["fingerprint"] = review_fingerprint(plan_dir)
+    seed_review.setdefault("comment", "")
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+
+
 def next_review_run_id(status):
     raw = str(status.get("review", {}).get("last_run_id") or "")
     if raw.startswith("R") and raw[1:].isdigit():
@@ -1711,21 +1775,17 @@ def command_current(_args):
 
 def command_show(args):
     _, plan_dir = active_plan()
-    if args.file == "draft":
-        print(read_text_file(plan_dir / "draft.md"), end="")
-        return
     print_yaml(load_yaml(file_path(plan_dir, args.file)))
 
 
 def command_review_context(_args):
     bundle = load_bundle()
+    title = bundle["plan_seed"]["seed"]["title"] if bundle.get("plan_seed") else bundle["plan_id"]
     data = {
         "active_plan": {"id": bundle["plan_id"], "dir": str(bundle["plan_dir"])},
-        "draft": bundle["draft"],
-        "plan": bundle["plan"],
-        "tasks": bundle["tasks"],
         "plan_seed": bundle["plan_seed"],
-        "planning_context": bundle["planning_context"],
+        "tasks": bundle["tasks"],
+        "context_pack": build_planning_context(bundle["plan_id"], bundle["plan_dir"], title, bundle["interview"]),
         "interview": bundle["interview"],
         "status": bundle["status"],
         "notes": bundle["notes"],
@@ -1777,17 +1837,15 @@ def run_git(args):
 
 def agent_context(plan_dir):
     plan_seed_path = plan_dir / "plan_seed.yaml"
-    request_path = plan_dir / "request.yaml"
+    plan_id, _ = active_plan()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    plan_seed = load_yaml(plan_seed_path) if plan_seed_path.exists() else None
+    title = plan_seed["seed"]["title"] if plan_seed else plan_dir.name.replace("-", " ").title()
     bundle = {
-        "draft": read_text_file(plan_dir / "draft.md"),
-        "plan": load_yaml(plan_dir / "plan.yaml"),
         "tasks": load_yaml(plan_dir / "tasks.yaml"),
-        "request": load_yaml(request_path) if request_path.exists() else None,
-        "plan_seed": load_yaml(plan_seed_path) if plan_seed_path.exists() else None,
-        "planning_context": load_yaml(plan_dir / "planning_context.yaml")
-        if (plan_dir / "planning_context.yaml").exists()
-        else None,
-        "interview": load_yaml(plan_dir / "interview.yaml"),
+        "plan_seed": plan_seed,
+        "context_pack": build_planning_context(plan_id, plan_dir, title, interview),
+        "interview": interview,
         "status": load_yaml(plan_dir / "status.yaml"),
         "notes": load_yaml(plan_dir / "notes.yaml"),
     }
@@ -2033,10 +2091,20 @@ def plan_seed_prompt(plan_dir):
     )
 
 
+def seed_reviser_prompt(plan_dir, feedback):
+    return (
+        "You are the coplan seed_reviser. Rewrite plan_seed.yaml seed content for wording-only user feedback. Return JSON only using the same seed schema.\n"
+        "Preserve the existing goal, constraints, non-goals, success criteria, execution boundaries, verification expectations, deferred items, and source_round_ids unless the wording can be clarified without changing meaning.\n"
+        "If the feedback requires a semantic change, keep the existing seed meaning and summarize the limitation in wording; the CLI routes semantic feedback through interview instead.\n\n"
+        f"Feedback:\n{feedback}\n\n"
+        f"Context:\n{agent_context(plan_dir)}"
+    )
+
+
 def reviewer_prompt(plan_dir, reviewer):
     if reviewer == "contract_reviewer":
         focus = (
-            "Review whether draft.md, plan.yaml, and tasks.yaml faithfully implement plan_seed.yaml. "
+            "Review whether tasks.yaml faithfully implements plan_seed.yaml. "
             "Block hidden decisions, scope drift, contradictions, task DAG assumptions, file scope problems, and acceptance criteria that ask execution to choose between materially different user-visible behaviors."
         )
     else:
@@ -2046,7 +2114,7 @@ def reviewer_prompt(plan_dir, reviewer):
         )
     return (
         f"You are the {reviewer} for a coplan bundle. {focus}\n"
-        "Return JSON only with status PASS or FAIL. This is a post-author bundle review even though the persisted stage name is pre-draft. Do not re-check mechanical schema fields owned by CLI validation unless the semantics are meaningless.\n\n"
+        "Return JSON only with status PASS or FAIL. This is a post-author bundle review. Do not re-check mechanical schema fields owned by CLI validation unless the semantics are meaningless.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
     )
 
@@ -2228,7 +2296,7 @@ def set_nested(data, path, value=None, add=False, remove=False):
 
 
 def flow_mode_from_phase(phase):
-    if phase in {"drafting", "draft_review", "planning"}:
+    if phase in {"planning", "seed_review"}:
         return "planner"
     if phase in {"ready_for_exec", "executing"}:
         return "executor"
@@ -2324,10 +2392,10 @@ def ask_user_action(pending):
     return action
 
 
-def present_draft_action(plan_dir):
+def present_plan_seed_action(plan_dir):
     return {
-        "type": "present_draft",
-        "draft": read_text_file(plan_dir / "draft.md"),
+        "type": "present_plan_seed",
+        "plan_seed": load_plan_seed(plan_dir),
         "response_command": f"{CLI_COMMAND_NAME} flow respond --stdin",
     }
 
@@ -2358,6 +2426,7 @@ def task_root_action(bundle, action_type):
         "type": action_type,
         "active_plan": active_plan_summary(bundle),
         "task": task_state["task"],
+        "plan_seed": bundle.get("plan_seed"),
         "status": task_state["summary"],
         "task_view": task_state["view"],
         "evidence_state": task_state["evidence_state"],
@@ -2379,39 +2448,12 @@ def init_plan(plan_id, title, replace=False, initial_context=""):
     (plan_dir / "evidence").mkdir(parents=True, exist_ok=True)
     PLAN_ROOT.mkdir(parents=True, exist_ok=True)
     write_yaml(EXEC_FILE, {"active_plan_id": plan_id, "plan_dir": str(plan_dir)})
-    (plan_dir / "draft.md").write_text(
-        "\n".join(
-            [
-                DRAFT_PLACEHOLDER_MARKER,
-                f"# {title}",
-                "",
-                f"Draft is pending. Run `{CLI_COMMAND_NAME} flow next` to continue planning.",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    write_yaml(
-        plan_dir / "plan.yaml",
-        {
-            "title": title,
-            "goal": "",
-            "context": [],
-            "non_goals": [],
-            "constraints": [],
-            "success_criteria": [],
-            "verification_policy": [],
-            "execution_strategy": [],
-            "stop_conditions": ["user_decision", "external_environment"],
-        },
-    )
     write_yaml(plan_dir / "tasks.yaml", {"tasks": []})
-    write_yaml(plan_dir / "request.yaml", {"title": title, "prompt": initial_context})
     write_yaml(plan_dir / "interview.yaml", default_interview(initial_context))
     write_yaml(
         plan_dir / "status.yaml",
         {
-            "phase": "drafting",
+            "phase": "planning",
             "review": default_review_state(),
             "current_task": None,
             "tasks": {},
@@ -2506,6 +2548,12 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
     interview["closure"]["summary"] = ""
     interview["closure_audit"] = default_closure_audit()
     interview["completion_candidate_streak"] = 0
+    interview["seed_review"] = {
+        "status": "not_presented",
+        "fingerprint": None,
+        "comment": "",
+        "feedback": [],
+    }
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
@@ -2557,6 +2605,12 @@ def score_interview_internal(plan_dir, mode="auto"):
     else:
         interview["completion_candidate_streak"] = 0
     interview["closure_audit"] = default_closure_audit()
+    interview["seed_review"] = {
+        "status": "not_presented",
+        "fingerprint": None,
+        "comment": "",
+        "feedback": [],
+    }
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
@@ -2663,11 +2717,48 @@ def write_plan_seed_internal(plan_dir):
     validate_plan_seed(plan_seed)
     write_yaml(plan_dir / "plan_seed.yaml", plan_seed)
     reset_review_status(plan_dir)
+    reset_seed_review_state(plan_dir)
     append_flow_log(
         plan_dir,
         "plan_seed.generated",
         round_count=plan_seed["round_count"],
         ambiguity_score_id=plan_seed["ambiguity_score_id"],
+        goal_hash=hash_text(output.get("goal")),
+    )
+    return plan_seed
+
+
+def revise_plan_seed_internal(plan_dir, feedback):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    if not plan_seed_is_current(plan_dir, interview):
+        raise ExError("seed revision requires a current plan_seed.yaml")
+    output = run_interview_codex_agent(
+        plan_dir,
+        interview,
+        "seed_reviser",
+        seed_reviser_prompt(plan_dir, feedback),
+        plan_seed_schema(),
+    )
+    latest = interview.get("ambiguity", {}).get("latest") or {}
+    plan_seed = {
+        "status": "ready",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "round_count": len(interview.get("rounds", [])),
+        "ambiguity_score_id": latest.get("id"),
+        "closure_audit": interview.get("closure_audit"),
+        "seed": output,
+    }
+    validate_plan_seed(plan_seed)
+    write_yaml(plan_dir / "plan_seed.yaml", plan_seed)
+    reset_review_status(plan_dir)
+    reset_seed_review_state(plan_dir, preserve_feedback=True)
+    append_flow_log(
+        plan_dir,
+        "plan_seed.revised",
+        round_count=plan_seed["round_count"],
+        ambiguity_score_id=plan_seed["ambiguity_score_id"],
+        feedback_hash=hash_text(feedback),
         goal_hash=hash_text(output.get("goal")),
     )
     return plan_seed
@@ -2722,7 +2813,7 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
         pending = interview.get("pending_user_question")
         if pending is not None:
             return ask_user_action(pending)
-        if interview_draft_ready(interview):
+        if interview_seed_ready(interview):
             return None
         question = non_user_streak_question(interview)
         if question:
@@ -2934,33 +3025,6 @@ def bundle_author_schema():
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "draft_markdown": {"type": "string"},
-            "plan": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "title": {"type": "string"},
-                    "goal": {"type": "string"},
-                    "context": string_array,
-                    "non_goals": string_array,
-                    "constraints": string_array,
-                    "success_criteria": string_array,
-                    "verification_policy": string_array,
-                    "execution_strategy": string_array,
-                    "stop_conditions": string_array,
-                },
-                "required": [
-                    "title",
-                    "goal",
-                    "context",
-                    "non_goals",
-                    "constraints",
-                    "success_criteria",
-                    "verification_policy",
-                    "execution_strategy",
-                    "stop_conditions",
-                ],
-            },
             "tasks": {
                 "type": "object",
                 "additionalProperties": False,
@@ -2969,20 +3033,20 @@ def bundle_author_schema():
             },
             "summary": {"type": "string"},
         },
-        "required": ["draft_markdown", "plan", "tasks", "summary"],
+        "required": ["tasks", "summary"],
     }
 
 
 def bundle_author_prompt(plan_dir, review_results=None, feedback=None):
     extra = ""
     if review_results:
-        extra += "\nPre-draft review findings to fix:\n" + dump_json(review_results)
+        extra += "\nBundle review findings to fix:\n" + dump_json(review_results)
     if feedback:
-        extra += "\nUser draft feedback to apply:\n" + feedback
+        extra += "\nUser seed feedback to apply:\n" + feedback
     return (
-        "You are the coplan bundle_author. Produce final draft.md, plan.yaml, and tasks.yaml content as JSON only.\n"
+        "You are the coplan bundle_author. Produce final tasks.yaml content as JSON only.\n"
         "Use plan_seed.yaml as the source of truth. Inspect the repository only to ground implementation boundaries and commands. Do not edit files directly. Do not leave TBD placeholders.\n"
-        "Do not expand, narrow, or reinterpret the seed. If feedback is present, apply it only within the approved seed unless it is wording-only feedback from draft review.\n"
+        "Do not expand, narrow, or reinterpret the seed. Project goal, constraints, non-goals, success criteria, execution boundaries, and verification expectations must be projected into task context, must_do, must_not_do, acceptance_criteria, and verification.\n"
         "Every task must satisfy the coflow task schema and include at least one final_verification task.\n"
         "Every expected_evidence.file must be a relative artifact path under evidence/, such as evidence/t01-preflight.txt.\n"
         "Keep execution decisions static so the executor does not need to plan.\n\n"
@@ -2992,31 +3056,16 @@ def bundle_author_prompt(plan_dir, review_results=None, feedback=None):
 
 
 def write_authored_bundle(plan_dir, output):
-    draft = str(output.get("draft_markdown", "")).strip() + "\n"
-    if not draft.strip() or DRAFT_PLACEHOLDER_MARKER in draft:
-        raise ExError("bundle_author returned invalid draft_markdown")
-    plan = output.get("plan")
     tasks = output.get("tasks")
-    if not isinstance(plan, dict) or not isinstance(tasks, dict):
-        raise ExError("bundle_author must return plan and tasks mappings")
-    validate_plan(plan)
+    if not isinstance(tasks, dict):
+        raise ExError("bundle_author must return tasks mapping")
     validate_tasks(tasks)
-    plan_id, active_dir = active_plan()
-    title = plan.get("title") or active_dir.name.replace("-", " ").title()
-    interview = load_yaml(plan_dir / "interview.yaml")
-    context = build_planning_context(plan_id, plan_dir, title, interview)
-    write_yaml(plan_dir / "planning_context.yaml", context)
-    (plan_dir / "draft.md").write_text(draft, encoding="utf-8")
-    write_yaml(plan_dir / "plan.yaml", plan)
     write_yaml(plan_dir / "tasks.yaml", tasks)
     sync_status_tasks(plan_dir, tasks)
     reset_review_status(plan_dir)
     append_flow_log(
         plan_dir,
         "bundle.authored",
-        draft_hash=hash_text(draft),
-        draft_bytes=len(draft.encode("utf-8")),
-        plan_hash=hash_text(dump_json(plan)),
         tasks_hash=hash_text(dump_json(tasks)),
         task_count=len(tasks.get("tasks", [])) if isinstance(tasks.get("tasks"), list) else None,
     )
@@ -3028,11 +3077,8 @@ def validate_bundle_internal(plan_dir):
     if not plan_seed_is_current(plan_dir, interview):
         raise ExError("plan_seed.yaml must match the closed interview")
     load_plan_seed(plan_dir)
-    validate_draft_markdown(plan_dir)
-    plan = load_yaml(plan_dir / "plan.yaml")
     tasks = load_yaml(plan_dir / "tasks.yaml")
     status = load_yaml(plan_dir / "status.yaml")
-    validate_plan(plan)
     validate_tasks(tasks)
     validate_status(status, tasks)
 
@@ -3069,7 +3115,7 @@ def run_review_internal(plan_dir):
             "decision" if review_status == "PASS" else "risk",
             f"{reviewer} {review_status}: {result['summary']}",
             "Codex CLI bundle review.",
-            ["plan.yaml", "tasks.yaml"],
+            ["plan_seed.yaml", "tasks.yaml"],
             f"{CLI_COMMAND_NAME} flow next",
         )
     previous_status = status
@@ -3077,7 +3123,7 @@ def run_review_internal(plan_dir):
     status["review"] = {
         **default_review_state(),
         "status": "passed" if len(passed_reviewers) == len(REQUIRED_REVIEWERS) else "failed",
-        "stage": "pre-draft",
+        "stage": "bundle",
         "required_reviewers": list(REQUIRED_REVIEWERS),
         "passed_reviewers": passed_reviewers,
         "last_run_id": next_review_run_id(previous_status),
@@ -3149,22 +3195,23 @@ def author_and_review_until_boundary(plan_dir, feedback=None):
         if review["review"]["status"] == "passed":
             status = load_yaml(plan_dir / "status.yaml")
             previous_phase = status.get("phase")
-            status["phase"] = "draft_review"
+            status["phase"] = "seed_review"
             validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
             write_yaml(plan_dir / "status.yaml", status)
+            mark_seed_review_presented(plan_dir)
             append_flow_log(
                 plan_dir,
                 "state.transition",
                 file="status.yaml",
                 field="phase",
                 previous=previous_phase,
-                current="draft_review",
+                current="seed_review",
                 reason="review_passed",
             )
             return {
                 "review": review["review"],
                 "author_summary": output.get("summary", ""),
-                "root_action": present_draft_action(plan_dir),
+                "root_action": present_plan_seed_action(plan_dir),
             }
         review_results = review["results"]
     interview = load_yaml(plan_dir / "interview.yaml")
@@ -3202,42 +3249,17 @@ def planner_needs_authoring(plan_dir):
 
 
 def approve_and_finalize(plan_dir, comment):
-    require_interview_closed(plan_dir, "draft approval")
-    validate_draft_markdown(plan_dir)
+    require_interview_closed(plan_dir, "plan seed approval")
+    load_plan_seed(plan_dir)
     status = load_yaml(plan_dir / "status.yaml")
-    require_review_passed(plan_dir, status, "draft approval")
-    previous_phase = status.get("phase")
-    status["phase"] = "planning"
-    validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
-    write_yaml(plan_dir / "status.yaml", status)
-    append_flow_log(
-        plan_dir,
-        "state.transition",
-        file="status.yaml",
-        field="phase",
-        previous=previous_phase,
-        current="planning",
-        reason="draft_approved",
-    )
-    append_note(
-        plan_dir,
-        "decision",
-        comment or "Draft approved.",
-        "Draft approval comment.",
-        ["draft.md", "status.yaml#phase"],
-        f"{CLI_COMMAND_NAME} flow respond",
-    )
-    plan = load_yaml(plan_dir / "plan.yaml")
-    tasks = load_yaml(plan_dir / "tasks.yaml")
-    status = load_yaml(plan_dir / "status.yaml")
-    validate_plan(plan)
-    validate_tasks(tasks)
-    validate_status(status, tasks)
-    require_draft_approved(status)
-    require_review_passed(plan_dir, status, "flow finalize")
+    if status.get("phase") != "seed_review":
+        raise ExError("plan seed approval requires seed_review phase")
+    require_review_passed(plan_dir, status, "plan seed approval")
     previous_phase = status.get("phase")
     status["phase"] = "ready_for_exec"
+    validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
     write_yaml(plan_dir / "status.yaml", status)
+    mark_seed_review_approved(plan_dir, comment)
     append_flow_log(
         plan_dir,
         "state.transition",
@@ -3245,8 +3267,21 @@ def approve_and_finalize(plan_dir, comment):
         field="phase",
         previous=previous_phase,
         current="ready_for_exec",
-        reason="finalize",
+        reason="plan_seed_approved",
     )
+    append_note(
+        plan_dir,
+        "decision",
+        comment or "Plan seed approved.",
+        "Plan seed approval comment.",
+        ["plan_seed.yaml", "status.yaml#phase"],
+        f"{CLI_COMMAND_NAME} flow respond",
+    )
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    status = load_yaml(plan_dir / "status.yaml")
+    validate_tasks(tasks)
+    validate_status(status, tasks)
+    require_review_passed(plan_dir, status, "flow finalize")
 
 
 def feedback_schema():
@@ -3264,7 +3299,7 @@ def feedback_schema():
     }
 
 
-def classify_draft_feedback(plan_dir, feedback):
+def classify_seed_feedback(plan_dir, feedback):
     normalized = feedback.strip().lower()
     approval_words = {"approve", "approved", "yes", "ok", "ship", "looks good", "승인", "좋아", "좋습니다", "확정"}
     if normalized in approval_words:
@@ -3273,28 +3308,29 @@ def classify_draft_feedback(plan_dir, feedback):
             "track": "scope",
             "question": "",
             "answer": feedback,
-            "summary": "Draft approved.",
+            "summary": "Plan seed approved.",
         }
     prompt = (
-        "Classify this draft feedback for coflow. Return JSON only.\n"
-        "approve means the user accepts the draft. wording_change means text-only polish. "
+        "Classify this plan seed feedback for coflow. Return JSON only.\n"
+        "approve means the user accepts the plan seed. wording_change means text-only polish. "
         "meaning_change means scope, output, verification, constraints, or stop conditions changed.\n\n"
-        f"Draft:\n{read_text_file(plan_dir / 'draft.md')}\n\nFeedback:\n{feedback}"
+        f"Plan seed:\n{dump_json(load_plan_seed(plan_dir))}\n\nFeedback:\n{feedback}"
     )
-    return run_codex_agent("draft_feedback", prompt, feedback_schema(), cwd=Path.cwd(), plan_dir=plan_dir)["output"]
+    return run_codex_agent("seed_feedback", prompt, feedback_schema(), cwd=Path.cwd(), plan_dir=plan_dir)["output"]
 
 
-def apply_draft_feedback(plan_dir, feedback):
-    classification = classify_draft_feedback(plan_dir, feedback)
+def apply_seed_feedback(plan_dir, feedback):
+    classification = classify_seed_feedback(plan_dir, feedback)
     append_flow_log(
         plan_dir,
-        "draft_feedback.classified",
+        "seed_feedback.classified",
         action=classification.get("action"),
         track=classification.get("track"),
         feedback_hash=hash_text(feedback),
         feedback_bytes=len(feedback.encode("utf-8")),
         summary_hash=hash_text(classification.get("summary")),
     )
+    append_seed_review_feedback(plan_dir, feedback, classification)
     action = classification["action"]
     if action == "approve":
         approve_and_finalize(plan_dir, classification.get("summary") or feedback)
@@ -3304,11 +3340,12 @@ def apply_draft_feedback(plan_dir, feedback):
             plan_dir,
             "revision",
             classification.get("summary") or feedback,
-            "User requested wording-only draft feedback.",
-            ["draft.md"],
+            "User requested wording-only plan seed feedback.",
+            ["plan_seed.yaml"],
             f"{CLI_COMMAND_NAME} flow respond",
         )
-        result = author_and_review_until_boundary(plan_dir, feedback=feedback)
+        revise_plan_seed_internal(plan_dir, feedback)
+        result = author_and_review_until_boundary(plan_dir)
         result["feedback"] = classification
         return result
     track = classification["track"]
@@ -3316,11 +3353,19 @@ def apply_draft_feedback(plan_dir, feedback):
     interview["status"] = "open"
     interview["closure"]["ready"] = False
     interview["closure"]["summary"] = ""
+    interview["closure_audit"] = default_closure_audit()
+    interview["completion_candidate_streak"] = 0
+    interview["seed_review"] = {
+        "status": "not_presented",
+        "fingerprint": None,
+        "comment": "",
+        "feedback": [],
+    }
     interview["required_tracks"][track]["status"] = "open"
     interview["required_tracks"][track]["summary"] = ""
     status = load_yaml(plan_dir / "status.yaml")
     previous_phase = status.get("phase")
-    status["phase"] = "drafting"
+    status["phase"] = "planning"
     validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
     write_yaml(plan_dir / "status.yaml", status)
     append_flow_log(
@@ -3329,8 +3374,8 @@ def apply_draft_feedback(plan_dir, feedback):
         file="status.yaml",
         field="phase",
         previous=previous_phase,
-        current="drafting",
-        reason="meaning_change_feedback",
+        current="planning",
+        reason="seed_meaning_change_feedback",
     )
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
@@ -3347,7 +3392,7 @@ def apply_draft_feedback(plan_dir, feedback):
         track=pending["track"],
         question=pending["question"],
         answer=classification["answer"] or feedback,
-        source="from-user:co-flow-draft-feedback",
+        source="from-user:co-flow-seed-feedback",
     )
     return {"feedback": classification}
 
@@ -3558,12 +3603,9 @@ def advance_planner_until_boundary(feedback=None):
     plan_id, plan_dir = active_plan()
     status = load_yaml(plan_dir / "status.yaml")
     phase = status.get("phase")
-    if phase == "draft_review":
-        return {"root_action": present_draft_action(plan_dir)}
-    if phase == "planning":
-        approve_and_finalize(plan_dir, "Draft already approved.")
-        return advance_executor_until_boundary()
-    if phase != "drafting":
+    if phase == "seed_review":
+        return {"root_action": present_plan_seed_action(plan_dir)}
+    if phase != "planning":
         raise ExError(f"phase is not plannable: {phase}")
     action = advance_interview_until_boundary(plan_dir)
     if action:
@@ -3573,27 +3615,28 @@ def advance_planner_until_boundary(feedback=None):
         return result
     status = load_yaml(plan_dir / "status.yaml")
     previous_phase = status.get("phase")
-    status["phase"] = "draft_review"
+    status["phase"] = "seed_review"
     validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
     write_yaml(plan_dir / "status.yaml", status)
+    mark_seed_review_presented(plan_dir)
     append_flow_log(
         plan_dir,
         "state.transition",
         file="status.yaml",
         field="phase",
         previous=previous_phase,
-        current="draft_review",
-        reason="planner_ready_for_draft_review",
+        current="seed_review",
+        reason="planner_ready_for_seed_review",
     )
-    return {"root_action": present_draft_action(plan_dir)}
+    return {"root_action": present_plan_seed_action(plan_dir)}
 
 
 def advance_flow_until_boundary(feedback=None):
     _, plan_dir = active_plan()
     phase = load_yaml(plan_dir / "status.yaml").get("phase")
-    if phase in {"drafting", "draft_review", "planning"}:
+    if phase in {"planning", "seed_review"}:
         result = advance_planner_until_boundary(feedback=feedback)
-        if result["root_action"]["type"] in {"ask_user", "present_draft"}:
+        if result["root_action"]["type"] in {"ask_user", "present_plan_seed"}:
             return result
         return advance_flow_until_boundary()
     return advance_executor_until_boundary()
@@ -3602,12 +3645,12 @@ def advance_flow_until_boundary(feedback=None):
 def status_flow_boundary():
     bundle = load_bundle()
     phase = bundle["status"].get("phase")
-    if phase == "drafting":
+    if phase == "planning":
         pending = bundle["interview"].get("pending_user_question")
         action = ask_user_action(pending) if pending else continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to continue planning.")
-    elif phase == "draft_review":
-        action = present_draft_action(bundle["plan_dir"])
-    elif phase in {"planning", "ready_for_exec"}:
+    elif phase == "seed_review":
+        action = present_plan_seed_action(bundle["plan_dir"])
+    elif phase == "ready_for_exec":
         action = continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to continue mechanical transitions.")
     elif phase == "executing":
         current_id = bundle["status"].get("current_task")
@@ -3639,10 +3682,10 @@ def flow_init(args):
         plan_dir,
         CURRENT_FLOW_COMMAND or "flow init",
         phase_before=None,
-        phase_after="drafting",
+        phase_after="planning",
     )
     print_flow_result(
-        {"phase": "drafting"},
+        {"phase": "planning"},
         continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to continue planning."),
         mode="planner",
     )
@@ -3667,8 +3710,8 @@ def flow_respond(args):
     _, plan_dir = active_plan()
     status = load_yaml(plan_dir / "status.yaml")
     phase = status.get("phase")
-    if phase == "draft_review":
-        feedback_result = apply_draft_feedback(plan_dir, response)
+    if phase == "seed_review":
+        feedback_result = apply_seed_feedback(plan_dir, response)
         if feedback_result.get("root_action"):
             print_flow_boundary(feedback_result)
             return
@@ -3678,7 +3721,7 @@ def flow_respond(args):
     interview = load_yaml(plan_dir / "interview.yaml")
     pending = interview.get("pending_user_question")
     if pending is None:
-        raise ExError("no pending user question or draft review is waiting for response")
+        raise ExError("no pending user question or plan seed review is waiting for response")
     recorded_response = response
     if pending.get("skip_eligible") and is_deferred_answer(response):
         recorded_response = (
@@ -3804,11 +3847,8 @@ def build_parser():
         "--file",
         required=True,
         choices=[
-            "draft",
-            "plan",
             "tasks",
             "plan-seed",
-            "planning-context",
             "interview",
             "status",
             "notes",

@@ -68,7 +68,7 @@ The log is always on for `co.py flow` and is for development feedback, not user-
 The log uses JSON Lines.
 Every event includes `seq`, `ts`, `event`, `plan_id`, and `phase` when an active plan exists.
 Common optional fields include `command`, `ok`, `phase_before`, `phase_after`, `root_action`, `task_id`, `track`, `route`, `role`, `status`, `duration_ms`, `input_hash`, `stdin_bytes`, and `output_summary`.
-Raw user answers, raw prompts, and full draft bodies are not stored; the CLI records hashes, byte lengths, and bounded summaries.
+Raw user answers and raw prompts are not stored in the flow log; the CLI records hashes, byte lengths, and bounded summaries.
 
 High-value event families:
 
@@ -77,13 +77,13 @@ High-value event families:
 - `interview.*` shows pending question creation, answer recording, ambiguity scoring, and interview closure.
 - `codex_agent.*` shows private Codex CLI subagent execution behind the CLI.
 - `bundle.authored`, `review.result`, and `review.join` show bundle generation and parallel review behavior.
-- `draft_feedback.classified` shows draft feedback routing.
+- `seed_feedback.classified` shows plan seed feedback routing.
 - `state.transition`, `task.claimed`, `task.completed`, `evidence.recorded`, `repair.applied`, `halt.recorded`, and `execution.completed` show executor orchestration.
 
 Use the flow log to check responsibility boundaries:
 
 - Root stays thin when each `root_action.emit` is followed by an allowed `flow.command.*` boundary instead of direct bundle edits.
-- Interview behaves like an iterator when one `flow respond` is followed by CLI-owned scoring, closure audit, seed generation, question creation, authoring, or draft presentation events.
+- Interview behaves like an iterator when one `flow respond` is followed by CLI-owned scoring, closure audit, seed generation, question creation, authoring, or plan seed presentation events.
 - Codex CLI agents remain internal details when `codex_agent.*` appears between CLI events rather than as root-facing commands.
 - Executor task selection stays in the CLI when `task.claimed` and `task.completed` are emitted by flow events.
 - Verification failure reaches the right boundary when failed `evidence.recorded` is followed by `root_action.emit` with `repair_task`.
@@ -97,11 +97,11 @@ Core flow:
 - initialize with `skills/coplan/scripts/co.py flow init --plan-id <id> --title "<title>" --stdin` or `--prompt "<request>"`.
 - continue with `skills/coplan/scripts/co.py flow next`.
 - ask exact `root_action.question` values and pipe answers to `co.py flow respond --stdin`.
-- present exact `root_action.draft` values and pipe approval or feedback to `co.py flow respond --stdin`.
+- present exact `root_action.plan_seed` values and pipe approval or feedback to `co.py flow respond --stdin`.
 - switch to `coexec` when `root_action.type` becomes `execute_task` or `repair_task`; report and stop on `report_halt`, `report_complete`, or `report_error`.
 
 The root agent does not directly edit bundle files.
-CLI-owned files include `request.yaml`, `plan_seed.yaml`, `draft.md`, `plan.yaml`, `tasks.yaml`, `planning_context.yaml`, `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml`.
+CLI-owned files include `plan_seed.yaml`, `tasks.yaml`, `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml`.
 
 ## Executor Path
 

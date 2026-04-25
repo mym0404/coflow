@@ -14,8 +14,6 @@ A bundle is planner-ready only when:
 - completion candidate streak is at least 2.
 - closure audit passed for the current score and round count.
 - `plan_seed.yaml` exists and matches the closed interview.
-- `draft.md` is written for user review and approved through `co.py flow respond --stdin`.
-- `plan.yaml` contains goal, context, non-goals, constraints, success criteria, verification policy, execution strategy, and stop conditions.
 - `tasks.yaml` contains no status fields.
 - `tasks.yaml` has at least one `kind: final_verification` task.
 - all task dependencies point to known tasks and form an acyclic graph.
@@ -23,13 +21,14 @@ A bundle is planner-ready only when:
 - every expected evidence path is a relative path under `evidence/`.
 - `status.yaml` task ids match `tasks.yaml` task ids.
 - `status.yaml.review.status` is `passed`.
-- `status.yaml.review.fingerprint` matches current `plan.yaml`, `tasks.yaml`, `interview.yaml`, and `plan_seed.yaml`.
+- `status.yaml.review.fingerprint` matches current `plan_seed.yaml`, `tasks.yaml`, and the semantic interview contract.
+- `interview.yaml.seed_review.status` reaches `approved`.
 - `notes.yaml` and `evidence.yaml` are present and CLI-managed.
 - `status.yaml.phase` reaches `ready_for_exec`.
 
 ## Interview Gate
 
-- `co.py flow init` creates `request.yaml` and `interview.yaml` with the initial request.
+- `co.py flow init` records the initial request in `interview.yaml.initial_context`.
 - `co.py flow next/respond` records every material question and answer.
 - User-judgment answers require a matching pending question created by `co.py flow`.
 - Route sources must match `from-code...`, `from-user...`, or `from-research...`.
@@ -47,17 +46,16 @@ A bundle is planner-ready only when:
 - Ambiguity scoring must produce a fresh score for the current round count.
 - `ambiguity = 1 - sum(clarity_i * weight_i)` must be `<= 0.2`.
 - Clarity floors must pass: goal `0.75`, constraints `0.65`, success criteria `0.70`, brownfield context `0.60`.
-- Meaning-changing draft feedback reopens the relevant track internally before new answers are recorded.
+- Meaning-changing plan seed feedback reopens the relevant track internally before new answers are recorded.
 
 ## Bundle Review Gate
 
-- The persisted review stage remains `pre-draft`.
-- Review runs after `bundle_author` writes `draft.md`, `plan.yaml`, and `tasks.yaml`.
+- Review runs after `bundle_author` writes `tasks.yaml`.
 - `contract_reviewer` and `verification_reviewer` run in parallel.
 - Both reviewers must return `PASS`.
 - Review results are recorded in `notes.yaml`.
-- Passing review stores `status.yaml.review.status: passed` and a fingerprint over `plan.yaml`, `tasks.yaml`, `interview.yaml`, and `plan_seed.yaml`.
-- If those files change after review, `co.py flow` reruns review before presenting or approving the draft.
+- Passing review stores `status.yaml.review.status: passed` and a fingerprint over `plan_seed.yaml`, `tasks.yaml`, and the semantic interview contract.
+- If those inputs change after review, `co.py flow` reruns review before presenting or approving the plan seed.
 
 ## Execution Gate
 
@@ -98,7 +96,6 @@ It must append one repair note in `notes.yaml`.
 It must not modify:
 
 - task id, title, kind, order, dependencies, acceptance criteria, or reopen conditions
-- `plan.yaml`
 - user-visible scope, non-goals, or success criteria
 
 ## Strong Task Example

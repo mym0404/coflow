@@ -14,12 +14,12 @@ sequenceDiagram
 
   User->>Root: [유저] planning 요청
   Root->>Co: [추론기계] co.py flow init --plan-id ... --title ... --stdin
-  Co->>Co: [기계] exec.yaml, request.yaml, 초기 bundle file 생성
+  Co->>Co: [기계] exec.yaml, interview.yaml, 초기 bundle file 생성
   Co-->>Root: [기계] root_action=continue_flow
 
   loop root boundary에 도달할 때까지
     Root->>Co: [추론기계] co.py flow next or co.py flow respond --stdin
-    Co->>Co: [기계] interview, status, context 읽기
+    Co->>Co: [기계] interview, status, tasks 읽기
     alt 사용자 답변이 필요함
       Co-->>Root: [기계] root_action=ask_user
       Root->>User: [추론기계] root_action.question 전달
@@ -44,8 +44,8 @@ sequenceDiagram
   end
 
   Co->>Agent: [기계] bundle_author
-  Agent-->>Co: [추론형식] draft.md, plan.yaml, tasks.yaml JSON
-  Co->>Co: [기계] bundle file 작성과 검증
+  Agent-->>Co: [추론형식] tasks.yaml JSON
+  Co->>Co: [기계] task bundle 작성과 검증
 
   loop bundle review가 통과할 때까지
     par contract review
@@ -57,28 +57,29 @@ sequenceDiagram
     end
     alt reviewer 실패
       Co->>Agent: [기계] bundle_author with findings
-      Agent-->>Co: [추론형식] revised bundle JSON
-      Co->>Co: [기계] bundle file 재작성과 검증
+      Agent-->>Co: [추론형식] revised tasks.yaml JSON
+      Co->>Co: [기계] task bundle 재작성과 검증
     else reviewer 통과
-      Co-->>Root: [기계] root_action=present_draft
+      Co-->>Root: [기계] root_action=present_plan_seed
     end
   end
 
-  Root->>User: [추론기계] root_action.draft 표시
+  Root->>User: [추론기계] root_action.plan_seed 표시
   User-->>Root: [유저] 승인 또는 feedback
   Root->>Co: [추론기계] co.py flow respond --stdin
-  Co->>Agent: [기계] 필요한 경우 draft feedback 분류
+  Co->>Agent: [기계] 필요한 경우 seed feedback 분류
   Agent-->>Co: [추론형식] approval, wording_change, or meaning_change JSON
   alt approval
-    Co->>Co: [기계] 승인, finalize, execution 준비, task claim
+    Co->>Co: [기계] 승인, execution 준비, task claim
     Co-->>Root: [기계] root_action=execute_task
   else wording change
-    Co->>Agent: [기계] bundle_author with wording feedback
+    Co->>Agent: [기계] seed_reviser
+    Co->>Agent: [기계] bundle_author
     Co->>Co: [기계] validation과 parallel review 재실행
-    Co-->>Root: [기계] root_action=present_draft
+    Co-->>Root: [기계] root_action=present_plan_seed
   else meaning change
     Co->>Co: [기계] track 재개방, feedback 답변 기록, 재계산
-    Co-->>Root: [기계] root_action=ask_user or present_draft
+    Co-->>Root: [기계] root_action=ask_user or present_plan_seed
   end
 ```
 
@@ -94,14 +95,15 @@ flowchart TD
   Answer["[유저] 답변 또는 수정"]
   Audit["[추론형식] closure audit"]
   Seed["[추론형식] plan seed 생성"]
-  Draft["[추론형식] plan draft 생성"]
+  Tasks["[추론형식] task bundle 생성"]
   Review["[기계] bundle review gate"]
-  DraftReady{"[기계] draft 표시 가능?"}
+  SeedReady{"[기계] plan seed 표시 가능?"}
   Repair["[추론형식] finding 반영"]
-  Present["[추론기계] draft 표시"]
+  Present["[추론기계] plan seed 표시"]
   Feedback{"[유저] 승인?"}
   Meaning["[유저] 의미 변경 또는 누락 요구"]
   Wording["[유저] 문구 수정"]
+  Revise["[추론형식] plan seed 수정"]
   Finalize["[기계] bundle 승인과 execution 준비"]
   Handoff(["[추론기계] execution 흐름으로 이동"])
 
@@ -113,24 +115,25 @@ flowchart TD
   Answer --> Iterate
   Boundary -->|seed ready| Audit
   Audit --> Seed
-  Seed --> Draft
-  Draft --> Review
-  Review --> DraftReady
-  DraftReady -->|no| Repair
-  Repair --> Review
-  DraftReady -->|yes| Present
+  Seed --> Tasks
+  Tasks --> Review
+  Review --> SeedReady
+  SeedReady -->|no| Repair
+  Repair --> Tasks
+  SeedReady -->|yes| Present
   Present --> Feedback
   Feedback -->|no, meaning change| Meaning
   Meaning --> Iterate
   Feedback -->|no, wording only| Wording
-  Wording --> Draft
+  Wording --> Revise
+  Revise --> Tasks
   Feedback -->|yes| Finalize
   Finalize --> Handoff
 
   linkStyle default stroke:#616161,stroke-width:1.5px
-  linkStyle 0,4,14,15,16,17,18 stroke:#2e7d32,stroke-width:2px
-  linkStyle 1,3,12,13,19 stroke:#1565c0,stroke-width:2px
-  linkStyle 2,5,6,7,11 stroke:#f9a825,stroke-width:2px
+  linkStyle 0,4,14,15,16,17,18,19 stroke:#2e7d32,stroke-width:2px
+  linkStyle 1,3,12,13,20 stroke:#1565c0,stroke-width:2px
+  linkStyle 2,5,6,7,8,11 stroke:#f9a825,stroke-width:2px
 ```
 
 ## Label Meaning

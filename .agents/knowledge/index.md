@@ -14,7 +14,7 @@ coflow contains Codex skills that coordinate a plan-then-execute workflow throug
 - `coplan` has three runtime roles: the root agent in the user surface, the `co.py` CLI, and Codex CLI agents launched by `co.py`.
 - The `co.py` CLI is the flow manager. It must mechanically own state transitions, gate checks, interview routing, closure audit, seed extraction, bundle authoring, bundle review, executor status, and `root_action` selection.
 - The root agent is a thin adapter. It runs `co.py flow`, parses stdout YAML, performs the exact `root_action`, and avoids replacing `co.py` with its own flow logic.
-- Codex CLI agents are subagents private to `co.py`; they provide schema-bound JSON judgments for interview action, ambiguity scoring, closure audit, seed extraction, bundle authoring, draft feedback classification, and bundle review.
+- Codex CLI agents are subagents private to `co.py`; they provide schema-bound JSON judgments for interview action, ambiguity scoring, closure audit, seed extraction, bundle authoring, plan seed feedback classification, and bundle review.
 - The plan and exec strategy is inspired by the local Ouroboros project, but coflow is a Codex App/CLI adaptation rather than a full port.
 - Repository changes do not need migration paths or backward compatibility unless the user explicitly asks for them.
 

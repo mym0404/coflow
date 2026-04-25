@@ -8,15 +8,13 @@ Use this only for density calibration. Create real bundles with `co.py flow init
 .agents/plan/
   exec.yaml
   add-health-endpoint/
-    draft.md
-    request.yaml
     plan_seed.yaml
-    plan.yaml
     tasks.yaml
     interview.yaml
     status.yaml
     notes.yaml
     evidence.yaml
+    flow_log.ndjson
     evidence/
 ```
 
@@ -25,42 +23,6 @@ Use this only for density calibration. Create real bundles with `co.py flow init
 ```yaml
 active_plan_id: add-health-endpoint
 plan_dir: .agents/plan/add-health-endpoint
-```
-
-## `draft.md`
-
-```md
-# Add health endpoint
-
-## Goal
-Add a lightweight unauthenticated readiness endpoint.
-
-## Scope
-
-| Included | Excluded |
-|---|---|
-| Add `GET /health`. | Auth redesign and deployment changes. |
-| Add focused and final verification. | Broader monitoring work. |
-
-## Known Facts
-
-| Fact | Source |
-|---|---|
-| `src/http/mod.rs` owns route registration. | from-code: local exploration |
-
-## Verification Direction
-
-| Check | Expected Signal |
-|---|---|
-| Focused route test | HTTP 200 with body `OK`. |
-| Final verification | Focused and broad checks pass. |
-```
-
-## `request.yaml`
-
-```yaml
-title: Add health endpoint
-prompt: Add a lightweight unauthenticated readiness endpoint.
 ```
 
 ## `plan_seed.yaml`
@@ -101,29 +63,6 @@ seed:
     - Q5
   deferred_items: []
   summary: The bundle should add a public OK health endpoint and prove it with focused and final verification.
-```
-
-## `plan.yaml`
-
-```yaml
-title: Add health endpoint
-goal: Ship a deployment-readiness endpoint with focused and final verification.
-context:
-  - src/http/mod.rs owns route registration.
-non_goals:
-  - Auth redesign.
-  - Deployment changes.
-constraints:
-  - Keep the response body exactly OK.
-success_criteria:
-  - GET /health returns HTTP 200 with body OK.
-verification_policy:
-  - Prefer focused verification before broad verification.
-execution_strategy:
-  - Execute the focused test, implementation, and final verification sequentially.
-stop_conditions:
-  - user_decision
-  - external_environment
 ```
 
 ## `tasks.yaml`
@@ -208,7 +147,7 @@ required_tracks:
     summary: Do not redesign auth or deployment.
   outputs:
     status: closed
-    summary: Produce the executable plan bundle; implementation happens later.
+    summary: Produce an executable task bundle.
   verification:
     status: closed
     summary: Focused and final verification evidence must be recorded.
@@ -253,11 +192,11 @@ pending_user_question: null
 deferred_items: []
 agent_runs: []
 ambiguity_ledger:
-  - id: S1
+  - score_id: S1
     ambiguity: 0.19
     ready: true
     round_count: 4
-  - id: S2
+  - score_id: S2
     ambiguity: 0.16
     ready: true
     round_count: 5
@@ -306,6 +245,11 @@ closure_audit:
   question: ""
   round_count: 5
   score_id: S2
+seed_review:
+  status: approved
+  fingerprint: <sha256>
+  comment: Plan seed approved.
+  feedback: []
 closure:
   ready: true
   summary: All execution-changing decisions are closed.
@@ -313,13 +257,13 @@ closure:
   checks:
     desired_output_explicit:
       passed: true
-      summary: The bundle output and no implementation output are explicit.
+      summary: The desired output is explicit.
     user_tradeoffs_explicit:
       passed: true
       summary: Scope, non-goals, and response constraints came from user judgment.
     closure_audit_passed:
       passed: true
-      summary: Broader verification scope was clarified before drafting.
+      summary: Broader verification scope was clarified.
     executor_determinism:
       passed: true
       summary: The executor has one route contract and concrete file surface.
@@ -337,7 +281,7 @@ closure:
 phase: ready_for_exec
 review:
   status: passed
-  stage: pre-draft
+  stage: bundle
   required_reviewers:
     - contract_reviewer
     - verification_reviewer
@@ -362,7 +306,7 @@ entries:
     text: contract_reviewer PASS: scope and acceptance criteria are aligned.
     why: Codex CLI bundle review.
     affects:
-      - plan.yaml
+      - plan_seed.yaml
       - tasks.yaml
     source: co.py flow next
 ```

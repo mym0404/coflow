@@ -8,7 +8,7 @@ Ouroboros evaluation is a progressive gate:
 - Stage 2: semantic model review against acceptance criteria and goal
 - Stage 3: consensus only when uncertainty or drift requires it
 
-coflow currently has planner pre-draft review and executor evidence gates.
+coflow currently has planner bundle review and executor evidence gates.
 When adding stronger evaluation behavior to coflow, prefer mechanical checks and recorded evidence first, then schema-bound model judgment, then user-visible halt or review gates.
 
 ## Evaluation Sources

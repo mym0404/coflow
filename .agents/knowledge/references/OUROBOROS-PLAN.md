@@ -10,7 +10,7 @@ Ouroboros planning is a specification-first flow:
 - generate an immutable Seed only after the ambiguity gate passes
 
 coflow's `coplan` is the Codex adaptation of this idea.
-The equivalent durable output is not an Ouroboros Seed; it is a plan bundle under `.agents/plan/{plan-id}/` with `draft.md`, `plan.yaml`, and `tasks.yaml`.
+The equivalent durable output is a plan bundle under `.agents/plan/{plan-id}/` with `plan_seed.yaml` as the user-reviewed contract and `tasks.yaml` as the executor contract.
 
 ## Core Planning Sources
 
@@ -105,7 +105,7 @@ Use this mapping when comparing designs:
 - Ouroboros `InterviewEngine` maps to coflow internal interview handling behind `co.py flow next/respond`.
 - Ouroboros ambiguity threshold maps to coflow `AMBIGUITY_THRESHOLD`.
 - Ouroboros clarity floors map to coflow `AMBIGUITY_FLOORS`.
-- Ouroboros Seed maps conceptually to coflow `plan_seed.yaml`, which then authors finalized `draft.md`, `plan.yaml`, and `tasks.yaml`.
+- Ouroboros Seed maps conceptually to coflow `plan_seed.yaml`, which then authors finalized `tasks.yaml`.
 - Ouroboros Seed immutability maps to coflow's post-finalize executor contract.
 - Ouroboros root skill routing maps to coflow root-agent stdout loop, but coflow should make the CLI own more decisions.
 
