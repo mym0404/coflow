@@ -45,9 +45,9 @@ Score each criterion on a 0-3 scale:
 
 Overall result:
 
-- `PASS`: total score is at least 21 and every criterion scores at least 2.
-- `REVIEW`: total score is 17-20, or any criterion scores 1 while the risk is isolated.
-- `FAIL`: total score is 16 or lower, or any criterion scores 0 in a way that can cause wrong planning, execution, or verification.
+- `PASS`: total score is at least 24 and every criterion scores at least 2.
+- `REVIEW`: total score is 19-23, or any criterion scores 1 while the risk is isolated.
+- `FAIL`: total score is 18 or lower, or any criterion scores 0 in a way that can cause wrong planning, execution, or verification.
 
 Report format:
 
@@ -55,7 +55,7 @@ Start with the verdict and total score, then use a compact Markdown table.
 
 ```text
 Semantic verification: PASS|REVIEW|FAIL
-Total: <score>/24
+Total: <score>/27
 
 | Criterion | Score | Judgment |
 |---|---:|---|
@@ -63,10 +63,11 @@ Total: <score>/24
 | C2 Ouroboros interview | <0-3> | <evidence and gap> |
 | C3 Plan seed review | <0-3> | <evidence and gap> |
 | C4 Role philosophy | <0-3> | <evidence and gap> |
-| C5 Thin root agents | <0-3> | <evidence and gap> |
-| C6 Task purpose context | <0-3> | <evidence and gap> |
-| C7 Project state context | <0-3> | <evidence and gap> |
-| C8 Subagent prompt context | <0-3> | <evidence and gap> |
+| C5 Coplan scoped root knowledge | <0-3> | <evidence and gap> |
+| C6 Coexec scoped root knowledge | <0-3> | <evidence and gap> |
+| C7 Task purpose context | <0-3> | <evidence and gap> |
+| C8 Project state context | <0-3> | <evidence and gap> |
+| C9 Subagent prompt context | <0-3> | <evidence and gap> |
 ```
 
 Keep each criterion note grounded in representative file paths and line numbers.
@@ -142,24 +143,45 @@ High-risk failures:
 - Subagent prompts or outputs become a user-facing contract.
 - CLI validation is replaced by prose instructions.
 
-### C5 Thin Root Agents
+### C5 Coplan Scoped Root Knowledge
 
-Question: Do `coplan` and `coexec` root agents communicate with `co.py` using minimal information?
+Question: Does `coplan` receive only the planner-side workflow knowledge needed for its role?
 
 Full credit requires:
 
-- `skills/coplan/SKILL.md` and `skills/coexec/SKILL.md` contain the stdout contract and per-action handling, not internal algorithms.
-- Root agents forward user answers, approvals, feedback, evidence, halt reasons, and command output without semantic rewriting.
-- Root agents do not directly read or edit bundle files for normal workflow decisions.
-- Root prompts avoid exposing scoring formulas, route metadata, or progress snapshots unless the action requires them.
+- `skills/coplan/SKILL.md` contains planner-only knowledge: initialize/respond, ask user, present plan seed, forward approval or feedback, and never execute verification.
+- The planner root agent forwards user answers, approvals, and feedback without semantic rewriting beyond the action contract.
+- `coplan` does not teach the root agent to run verification, record evidence, complete tasks, repair execution failures, choose task order, or finish execution.
+- `coplan` does not expose internal scoring formulas, private subagent outputs, route mechanics, or progress snapshots unless that data is required to perform the current planner root action.
+- `coplan` does not ask the root agent to directly read or edit bundle files for normal planner workflow decisions.
 
 High-risk failures:
 
-- Root prompts make the agent summarize or reinterpret user answers before sending them to the CLI.
-- Root prompts include enough internal workflow logic that the agent can bypass `co.py`.
-- Root agents are told to continue mechanically instead of returning to `co.py flow`.
+- `coplan` is taught executor behavior such as running verification, recording evidence, or completing tasks.
+- `coplan` asks the root agent to compute ambiguity, closure readiness, seed readiness, task readiness, or bundle validation instead of returning to `co.py`.
+- `coplan` makes the root agent summarize or reinterpret user answers before sending them to the CLI.
 
-### C6 Task Purpose Context
+### C6 Coexec Scoped Root Knowledge
+
+Question: Does `coexec` receive only the executor-side workflow knowledge needed for its role?
+
+Full credit requires:
+
+- `skills/coexec/SKILL.md` contains executor-only knowledge: `flow next`, implement current task, record mechanical/semantic evidence, run `task-done`, repair, halt, and report completion.
+- Executor knowledge of evidence recording, evidence command results, semantic self-review, and `task-done` is treated as required role knowledge, not excess root-agent scope.
+- The executor root agent forwards command output, evidence bodies, halt reasons, and completion summaries without semantic rewriting beyond the action contract.
+- `coexec` does not teach the root agent to score ambiguity, decide seed approval, mutate the plan contract, choose task order, or author new tasks.
+- `coexec` does not expose private planner subagent outputs, scoring internals, or planner route mechanics unless that data is part of the current executor `root_action`.
+- `coexec` does not ask the root agent to directly read or edit bundle files for normal executor workflow decisions.
+
+High-risk failures:
+
+- `coexec` is taught planner behavior such as scoring ambiguity, deciding seed approval, mutating the plan contract, or choosing task order.
+- `coexec` treats evidence recording or `task-done` as optional or as a hidden CLI concern the executor root agent need not perform.
+- `coexec` makes the root agent summarize or reinterpret command output, evidence, or completion summaries before sending them to the CLI.
+- `coexec` prompts include enough internal workflow logic that the agent can bypass `co.py`.
+
+### C7 Task Purpose Context
 
 Question: Are root agents given enough context about why the current work exists?
 
@@ -176,7 +198,7 @@ High-risk failures:
 - Plan seed context is not carried into task authoring or execution.
 - Scope, non-goals, or success criteria are only present in human-facing docs, not the runtime bundle.
 
-### C7 Project State Context
+### C8 Project State Context
 
 Question: Are root agents given enough context about the current project situation to act agentically within their boundary?
 
@@ -193,7 +215,7 @@ High-risk failures:
 - Executor repair receives only a failure flag, not enough failed evidence to diagnose within task scope.
 - Task file scope or verification commands are left for the executor to invent.
 
-### C8 Subagent Prompt Context
+### C9 Subagent Prompt Context
 
 Question: Do CLI-launched subagent prompts receive enough task and project context?
 
