@@ -20,8 +20,9 @@ It currently ships two skills:
 - Start with `.agents/knowledge/runtime.md` for the repo-level runtime map.
 - Use `skills/coplan/SKILL.md` when planning a new bundle.
 - Use `skills/coexec/SKILL.md` when executing an approved bundle.
-- Treat `skills/coplan/scripts/co` stdout YAML as the runtime contract.
+- Treat `skills/coplan/scripts/co flow` stdout YAML and `root_action` as the runtime contract.
 - When changing either the plan bundle/planner side or the executor side, keep the plan-exec concept synchronized so `coplan` still produces an executable static contract and `coexec` still executes it without making new planning decisions.
+- Migration paths and backward compatibility are not required for repository changes unless the user explicitly asks for them.
 
 ## Verification
 

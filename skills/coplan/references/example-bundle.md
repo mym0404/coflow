@@ -1,6 +1,6 @@
 # Example Plan Bundle
 
-Use this only for density calibration. Create real bundles with `co planner init`.
+Use this only for density calibration. Create real bundles with `co flow init`.
 
 ## Directory
 
@@ -299,7 +299,7 @@ entries:
     affects:
       - plan.yaml
       - tasks.yaml
-    source: co planner review run
+    source: co flow next
 ```
 
 ## `evidence.yaml`

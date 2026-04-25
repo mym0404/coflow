@@ -1,29 +1,19 @@
 # Codex CLI Pre-Draft Review
 
-Use this reference after `co planner generate-skeleton`, direct bundle patching, and `co planner validate`.
+Use this reference for the pre-draft review that `co flow` runs after bundle authoring.
 
 Review is mandatory and runs through `codex exec`. Multiple Codex CLI reviewers must run in parallel.
 
-## Command
+## Flow
 
-```bash
-co planner review run --stage pre-draft
-```
-
-The command runs both required reviewers in parallel:
+`co flow next/respond` runs both required reviewers in parallel:
 
 - `contract_reviewer`
 - `verification_reviewer`
 
 Both must return `PASS`. Results are stored in `notes.yaml` and `status.yaml.review`.
 
-## Rerun Discipline
-
-- Fix only valid findings.
-- Patch only the smallest necessary parts of `draft.md`, `plan.yaml`, or `tasks.yaml`.
-- Rerun review after any semantic change to `plan.yaml`, `tasks.yaml`, or `interview.yaml`.
-- Wording-only `draft.md` edits do not invalidate the review fingerprint.
-- If `approve-draft` or `finalize` says review is stale, rerun pre-draft review.
+If review fails, `co flow` sends findings back through `bundle_author`, rewrites the bundle, reruns deterministic validation, and reruns pre-draft review before presenting the draft.
 
 ## Reviewer Responsibilities
 
@@ -48,7 +38,7 @@ Checks:
 - evidence paths and meaning
 - final verification task
 - success signals
-- whether the verification proves the user's intended behavior
+- whether verification proves the user's intended behavior
 
 It should fail when verification is a ritual rather than a meaningful executable scenario.
 
@@ -89,4 +79,4 @@ Reviewers do not own these mechanical checks:
 - missing final verification task
 - task status embedded in `tasks.yaml`
 
-`co planner validate` owns those. Reviewers may still fail if the structures exist but are meaningless, misleading, flaky, or contradicted by repo reality.
+`co flow` deterministic validation owns those. Reviewers may still fail if the structures exist but are meaningless, misleading, flaky, or contradicted by repo reality.

@@ -140,7 +140,7 @@ Important source locations:
 
 Use this mapping when comparing designs:
 
-- Ouroboros Seed execution maps to coflow `co exec start`, `co exec ready`, `co exec claim`, `co exec evidence add`, and `co exec complete-task`.
+- Ouroboros Seed execution maps to coflow `co flow next`, `co flow evidence`, `co flow repair`, and `co flow halt`.
 - Ouroboros parallel AC execution maps conceptually to `tasks.yaml.depends_on`, but coflow currently executes one `Doing` task at a time.
 - Ouroboros subagent isolation maps conceptually to Codex CLI subagents used by `co` during planning review and scoring, not to arbitrary executor delegation.
 - Ouroboros post-execution QA maps conceptually to coflow final verification tasks and required evidence records.

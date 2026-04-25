@@ -1,16 +1,16 @@
 # Gates And Examples
 
-This file defines the plan-execute gates enforced by `co`.
+This file defines the plan-execute gates enforced by `co flow`.
 
 ## Planner Readiness Gate
 
 A bundle is planner-ready only when:
 
 - `.agents/plan/exec.yaml` points to the active `.agents/plan/{plan-id}/`.
-- The bundle was created with `co planner init`.
+- The bundle was created with `co flow init`.
 - `interview.yaml` is closed with every required ambiguity track closed.
 - latest ambiguity score is fresh, `<= 0.2`, and all clarity floors pass.
-- `draft.md` is written for user review and approved through `co planner approve-draft`.
+- `draft.md` is written for user review and approved through `co flow respond --stdin`.
 - `plan.yaml` contains goal, context, non-goals, constraints, success criteria, verification policy, execution strategy, and stop conditions.
 - `tasks.yaml` contains no status fields.
 - `tasks.yaml` has at least one `kind: final_verification` task.
@@ -21,14 +21,13 @@ A bundle is planner-ready only when:
 - `status.yaml.review.status` is `passed`.
 - `status.yaml.review.fingerprint` matches current `plan.yaml`, `tasks.yaml`, and `interview.yaml`.
 - `notes.yaml` and `evidence.yaml` are present and CLI-managed.
-- `co planner finalize` succeeds.
+- `status.yaml.phase` reaches `ready_for_exec`.
 
 ## Interview Gate
 
-- `co planner init` creates `interview.yaml` with required tracks open.
-- The planner records every material question and answer through `co planner interview record`.
-- User-judgment answers require a matching pending question from `co planner interview ask` or `co planner interview ask-next`.
-- `ask-next` may return `ask_user`, `record_fact`, or `ready_for_score`; `ready_for_score` means the root agent should run `co planner interview score --mode auto`.
+- `co flow init` creates `interview.yaml` with required tracks open.
+- `co flow next/respond` records every material question and answer.
+- User-judgment answers require a matching pending question created by `co flow`.
 - Route sources must match `from-code...`, `from-user...`, or `from-research...`.
 - Closure requires at least one round for every required track.
 - Closure requires user-judgment rounds on `scope`, `outputs`, and `verification`.
@@ -36,50 +35,37 @@ A bundle is planner-ready only when:
 - `user_decision` and `code_plus_decision` reset `non_user_answer_streak`.
 - Once `non_user_answer_streak` reaches 3, the next record must be `user_decision` or `code_plus_decision`.
 - Once one track has two consecutive rounds, the next record must use another open track.
-- `co planner interview score` must produce a fresh score for the current round count.
+- Ambiguity scoring must produce a fresh score for the current round count.
 - `ambiguity = 1 - sum(clarity_i * weight_i)` must be `<= 0.2`.
 - Clarity floors must pass: goal `0.75`, constraints `0.65`, success criteria `0.70`, brownfield context `0.60`.
-- `co planner interview close` fails until every closure check has passed.
-- `co planner interview close` fails while any required track is open or any material blocker remains.
-- `co planner approve-draft` and `co planner finalize` fail until the interview is closed.
-- Meaning-changing draft feedback must reopen the relevant track before any new record is added.
+- Meaning-changing draft feedback reopens the relevant track internally before new answers are recorded.
 
 ## Pre-Draft Review Gate
 
-- Pre-draft review runs through `co planner review run --stage pre-draft`.
-- `co planner review run --stage pre-draft` runs `contract_reviewer` and `verification_reviewer` in parallel.
-- Any future command that invokes multiple Codex CLI agents must use the same parallel execution rule.
-- `contract_reviewer` checks hidden decisions, scope drift, contradictions, task DAG assumptions, file scope, and acceptance criteria.
-- `verification_reviewer` checks commands, evidence, final verification, and success signals.
+- Pre-draft review runs through `co flow next/respond`.
+- `contract_reviewer` and `verification_reviewer` run in parallel.
 - Both reviewers must return `PASS`.
 - Review results are recorded in `notes.yaml`.
 - Passing review stores `status.yaml.review.status: passed` and a fingerprint over `plan.yaml`, `tasks.yaml`, and `interview.yaml`.
-- If those files change after review, `approve-draft` and `finalize` fail until review passes again.
-- Wording-only changes to `draft.md` do not invalidate the review fingerprint.
-
-## Direct Patch Gate
-
-- `draft.md`, `plan.yaml`, and `tasks.yaml` may be patched directly after `co planner generate-skeleton`.
-- `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml` remain CLI-owned.
-- Direct changes to `plan.yaml` or `tasks.yaml` must be followed by `co planner validate` and pre-draft review.
+- If those files change after review, `co flow` reruns review before presenting or approving the draft.
 
 ## Execution Gate
 
 The executor must:
 
-- Start each loop with `co exec status`.
-- Run `co exec start` only from `ready_for_exec`.
-- Claim only a task returned by `co exec ready`.
+- Start each loop with `co flow next`.
+- Execute only the task returned by `root_action.task`.
 - Keep exactly one task in `Doing`.
-- Record verification artifacts through `co exec evidence add`.
-- Complete a task only through `co exec complete-task`.
-- Finish only through `co exec finish`.
+- Record verification artifacts through `co flow evidence`.
+- Repair only through `co flow repair`.
+- Halt only through `co flow halt`.
+- Finish only when `co flow next` returns `root_action.type: report_complete`.
 
 ## In-Contract Failure Gate
 
 - Verification failures, missing evidence, stale file scope, and in-contract repair needs keep the task in `Doing`.
-- Use `co exec halt` only for `user_decision` or `external_environment`.
-- `halted` is not complete and `co exec finish` must fail while halted.
+- Use `co flow halt` only for `user_decision` or `external_environment`.
+- `halted` is not complete and cannot return `report_complete`.
 
 ## Evidence Gate
 
@@ -91,7 +77,7 @@ A task with `verification.evidence_required: true` is done only when:
 
 ## Repair Gate
 
-`co exec repair` may modify only contract-compatible envelope fields:
+`co flow repair` may modify only contract-compatible envelope fields:
 
 - `files`
 - `implementation_notes`
@@ -132,7 +118,6 @@ tasks:
         - id: focused-before
           command: cargo test health_route_returns_ok -- --exact
           success_signal: The test compiles and fails only because the route is missing.
-          failure_policy: Keep T1 in Doing and continue repair unless halt is required.
     acceptance_criteria:
       - The test asserts HTTP 200 and body OK.
     expected_evidence:

@@ -152,7 +152,7 @@ Important source locations:
 
 Use this mapping when comparing designs:
 
-- Ouroboros Stage 1 maps to coflow repo-native verification commands and `co exec evidence add`.
+- Ouroboros Stage 1 maps to coflow repo-native verification commands and `co flow evidence`.
 - Ouroboros Stage 2 maps to coflow Codex CLI pre-draft reviewers and any future schema-bound evaluator.
 - Ouroboros Stage 3 maps to a future coflow consensus or escalation gate, not to current required behavior.
 - Ouroboros drift and uncertainty triggers map to coflow halt conditions or planner review failures when they affect user-visible contract.

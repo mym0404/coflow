@@ -82,7 +82,7 @@ Use Ouroboros as a concept source, not as a strict compatibility target.
 - Ouroboros has interview, seed, execute, evaluate, evolve, MCP tools, plugin skills, event sourcing, runtime adapters, and optional persistent loops.
 - coflow currently ships two Codex skills: `skills/coplan` and `skills/coexec`.
 - coflow's durable state is `.agents/plan/{plan-id}` and the mechanical manager is `skills/coplan/scripts/co`.
-- coflow's root agent should stay thinner than the historical Ouroboros skill surface: run `co`, parse YAML, ask user questions exactly when instructed, and patch only allowed files.
+- coflow's root agent should stay thinner than the historical Ouroboros skill surface: run `co flow`, parse YAML, and perform only the returned `root_action`.
 - If a design idea from Ouroboros is adopted, prefer implementing it as a `co` command, validation rule, stdout field, or bundle schema change instead of only adding prose to `SKILL.md`.
 
 ## Detailed References

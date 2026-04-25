@@ -7,23 +7,23 @@ coflow provides two complementary Codex skills:
 - `coplan` creates a decision-complete plan bundle under `.agents/plan/{plan-id}`.
 - `coexec` executes the active bundle selected by `.agents/plan/exec.yaml`.
 
-The runtime has three planner-side roles:
+The runtime has three roles:
 
 - Root agent: the Codex App or Codex CLI agent in the user-facing session.
 - `co` CLI: the flow manager and mechanical owner of state transitions.
 - Codex CLI agents: subprocess subagents launched by `co` for bounded JSON judgments.
 
-The root agent should interact with bundles through `skills/coplan/scripts/co`.
-The CLI prints YAML for normal command responses, and `required_action` is the next-step contract.
-The root agent should not compute gate readiness, interview next steps, ambiguity, or execution status itself.
+The root agent should interact with bundles through `skills/coplan/scripts/co flow`.
+The CLI prints YAML, and `root_action` is the next-step contract.
+The root agent should not compute gate readiness, interview next steps, ambiguity, review status, task readiness, task completion, or execution finish state itself.
 
 ## Flow Ownership
 
 `co` exists because Codex App and Codex CLI users do not have a development SDK that lets this repository enforce agent behavior directly in code.
-The reliable control point is therefore the CLI contract:
+The reliable control point is therefore the `co flow` contract:
 
-- `co` owns bundle files, validation, state transitions, notes, evidence records, review freshness, and halt or finish gates.
-- Root-agent-facing skill instructions should keep the agent as a thin stdout-driven adapter.
+- `co` owns bundle files, validation, state transitions, notes, evidence records, review freshness, halt gates, and finish gates.
+- Root-agent-facing skill instructions should keep the agent as a thin `root_action` adapter.
 - If `co` can decide or validate a step mechanically, prefer adding the rule to `skills/coplan/scripts/co` over relying on prose instructions in the root agent skill.
 - Codex CLI subagents are implementation details of `co`; their JSON output is normalized by `co` before it reaches the root agent.
 
@@ -46,18 +46,14 @@ Use `skills/coplan/SKILL.md` as the planner entrypoint.
 
 Core flow:
 
-- initialize with `skills/coplan/scripts/co planner init --plan-id <id> --title "<title>"`.
-- explore the target repository before asking the user.
-- use `co planner interview ask-next` and record user answers through `co`.
-- run `co planner validate` before pre-draft review.
-- run `co planner review run --stage pre-draft` before showing the draft.
-- finalize with `co planner finalize` only after the draft is approved.
+- initialize with `skills/coplan/scripts/co flow init --plan-id <id> --title "<title>"`.
+- continue with `skills/coplan/scripts/co flow next`.
+- ask exact `root_action.question` values and pipe answers to `co flow respond --stdin`.
+- present exact `root_action.draft` values and pipe approval or feedback to `co flow respond --stdin`.
+- switch to `coexec` when `root_action.type` becomes `execute_task`, `repair_task`, `report_halt`, or `report_complete`.
 
-Direct bundle edits are limited to `draft.md`, `plan.yaml`, and `tasks.yaml` after skeleton generation.
-CLI-owned files such as `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml` are not edited directly.
-
-Planner flow is valid only when the root agent follows `co` stdout instead of recreating the full flow from memory.
-When changing planner behavior, keep `skills/coplan/references/root-agent-co-guide.md`, `skills/coplan/SKILL.md`, `skills/coplan/README.md`, and `skills/coplan/scripts/co` aligned around that contract.
+The root agent does not directly edit bundle files.
+CLI-owned files include `draft.md`, `plan.yaml`, `tasks.yaml`, `planning_context.yaml`, `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml`.
 
 ## Executor Path
 
@@ -65,24 +61,21 @@ Use `skills/coexec/SKILL.md` as the executor entrypoint.
 
 Core flow:
 
-- start each loop with `skills/coplan/scripts/co exec status`.
-- start execution from `ready_for_exec` with `co exec start`.
-- claim exactly one ready task with `co exec claim <task-id>`.
-- record verification output with `co exec evidence add`.
-- complete tasks with `co exec complete-task`.
-- finish only with `co exec finish` after every task, including final verification, is done.
+- start each loop with `skills/coplan/scripts/co flow next`.
+- implement only `root_action.task` when `root_action.type: execute_task`.
+- record verification output with `co flow evidence`.
+- repair only task envelope fields with `co flow repair`.
+- halt only through `co flow halt`.
+- report completion only after `root_action.type: report_complete`.
 
 Executor work must not redesign the approved plan contract.
-If a needed change would alter user-visible behavior, acceptance criteria, task order, dependencies, or non-goals, halt through `co exec halt`.
-
-Executor flow is status-driven.
-The root agent starts each loop with `co exec status`, then follows `required_action`, `allowed_now`, and `forbidden_now`.
+If a needed change would alter user-visible behavior, acceptance criteria, task order, dependencies, or non-goals, halt through `co flow halt`.
 
 ## Reference Tier
 
-- `skills/coplan/references/root-agent-co-guide.md` describes the shared stdout contract.
+- `skills/coplan/references/root-agent-co-guide.md` describes the shared `co flow` stdout contract.
 - `skills/coplan/references/bundle-schema.md` describes bundle files and required fields.
 - `skills/coplan/references/gates-and-examples.md` describes planner and executor gates.
-- `skills/coplan/references/interview-algorithm.md` describes ambiguity scoring and interview routing.
+- `skills/coplan/references/interview-algorithm.md` describes ambiguity scoring and interview routing internals.
 - `skills/coplan/references/codex-cli-reviewer.md` describes pre-draft review behavior.
 - `skills/coplan/references/example-bundle.md` is only a density and shape example.

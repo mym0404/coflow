@@ -112,6 +112,21 @@ DRAFT_APPROVED_PHASES = {
     "halted",
     "complete",
 }
+FLOW_CONTRACT_VERSION = "1"
+FLOW_ROOT_ACTION_TYPES = {
+    "ask_user",
+    "present_draft",
+    "execute_task",
+    "repair_task",
+    "report_halt",
+    "report_complete",
+    "continue_flow",
+}
+FLOW_FORBIDDEN_ACTIONS = [
+    "call removed planner, exec, or note mutation commands",
+    "edit CLI-owned bundle files directly",
+    "choose the next workflow step without `co flow`",
+]
 
 
 class ExError(Exception):
@@ -277,7 +292,7 @@ def build_codex_exec_command(
         "--skip-git-repo-check",
         "--ephemeral",
         "-c",
-        f'reasoning_effort="{CODEX_AGENT_REASONING_EFFORT}"',
+        f'model_reasoning_effort="{CODEX_AGENT_REASONING_EFFORT}"',
         "--sandbox",
         sandbox,
         "-C",
@@ -343,7 +358,7 @@ def run_codex_agent(role, prompt, schema, *, cwd=None):
             "role": role,
             "model": CODEX_AGENT_DEFAULT_MODEL,
             "sandbox": CODEX_AGENT_DEFAULT_SANDBOX,
-            "reasoning_effort": CODEX_AGENT_REASONING_EFFORT,
+            "model_reasoning_effort": CODEX_AGENT_REASONING_EFFORT,
             "command": command,
             "output": output,
             "stdout_tail": process.stdout.strip().splitlines()[-20:],
@@ -1490,7 +1505,7 @@ def append_interview_agent_run(plan_dir, interview, role, status, output=None, e
             "ephemeral": True,
             "sandbox": CODEX_AGENT_DEFAULT_SANDBOX,
             "model": CODEX_AGENT_DEFAULT_MODEL,
-            "reasoning_effort": CODEX_AGENT_REASONING_EFFORT,
+            "model_reasoning_effort": CODEX_AGENT_REASONING_EFFORT,
         },
         "status": status,
         "output": output,
@@ -1622,7 +1637,7 @@ def reviewer_prompt(plan_dir, reviewer):
         )
     return (
         f"You are the {reviewer} for a coplan bundle. {focus}\n"
-        "Return JSON only with status PASS or FAIL. Do not re-check mechanical schema fields owned by co planner validate unless the semantics are meaningless.\n\n"
+        "Return JSON only with status PASS or FAIL. Do not re-check mechanical schema fields owned by CLI validation unless the semantics are meaningless.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
     )
 
@@ -2600,6 +2615,1066 @@ def exec_finish(_args):
     print_result({"phase": "complete"}, "Report final completion to the user.")
 
 
+def flow_mode_from_phase(phase):
+    if phase in {"drafting", "draft_review", "planning"}:
+        return "planner"
+    if phase in {"ready_for_exec", "executing"}:
+        return "executor"
+    if phase == "halted":
+        return "halted"
+    if phase == "complete":
+        return "complete"
+    return "unknown"
+
+
+def flow_allowed_commands(action_type):
+    if action_type in {"ask_user", "present_draft"}:
+        return ["co flow respond --stdin", "co flow status"]
+    if action_type == "execute_task":
+        return [
+            'co flow evidence --step <step-id> --command "..." --exit-code <code> --success true|false --stdin',
+            'co flow repair --field <path> --reason "..." --set|--add|--remove <yaml>',
+            'co flow halt --kind user_decision|external_environment --reason "..."',
+            "co flow status",
+        ]
+    if action_type == "repair_task":
+        return [
+            'co flow repair --field <path> --reason "..." --set|--add|--remove <yaml>',
+            'co flow evidence --step <step-id> --command "..." --exit-code <code> --success true|false --stdin',
+            'co flow halt --kind user_decision|external_environment --reason "..."',
+            "co flow status",
+        ]
+    if action_type == "continue_flow":
+        return ["co flow next", "co flow status"]
+    return ["co flow status"]
+
+
+def flow_result(data, root_action, *, mode=None, allowed_commands=None, forbidden_actions=None):
+    action_type = root_action.get("type")
+    if action_type not in FLOW_ROOT_ACTION_TYPES:
+        raise ExError(f"unknown flow root action: {action_type}")
+    result = {
+        "ok": data.get("ok", True),
+        "contract_version": FLOW_CONTRACT_VERSION,
+        "mode": mode or data.get("mode") or "unknown",
+    }
+    for key, value in data.items():
+        if key not in {"ok", "mode"}:
+            result[key] = value
+    result["root_action"] = root_action
+    result["allowed_commands"] = allowed_commands or flow_allowed_commands(action_type)
+    result["forbidden_actions"] = forbidden_actions or FLOW_FORBIDDEN_ACTIONS
+    return result
+
+
+def print_flow_result(data, root_action, *, mode=None, allowed_commands=None, forbidden_actions=None):
+    print_yaml(
+        flow_result(
+            data,
+            root_action,
+            mode=mode,
+            allowed_commands=allowed_commands,
+            forbidden_actions=forbidden_actions,
+        )
+    )
+
+
+def print_flow_error(message):
+    print_flow_result(
+        {"ok": False, "error": message},
+        {
+            "type": "continue_flow",
+            "message": "Fix the reported input or state issue, then rerun the appropriate `co flow` command.",
+        },
+        mode="error",
+    )
+
+
+def active_plan_summary(bundle):
+    return {"id": bundle["plan_id"], "dir": str(bundle["plan_dir"])}
+
+
+def continue_flow_action(message):
+    return {"type": "continue_flow", "message": message, "next_command": "co flow next"}
+
+
+def ask_user_action(pending):
+    return {
+        "type": "ask_user",
+        "question": pending["question"],
+        "pending_user_question": pending,
+        "response_command": "co flow respond --stdin",
+    }
+
+
+def present_draft_action(plan_dir):
+    return {
+        "type": "present_draft",
+        "draft": read_text_file(plan_dir / "draft.md"),
+        "response_command": "co flow respond --stdin",
+    }
+
+
+def report_halt_action(bundle):
+    return {"type": "report_halt", "halt": bundle["status"].get("halt")}
+
+
+def report_complete_action(bundle):
+    return {
+        "type": "report_complete",
+        "active_plan": active_plan_summary(bundle),
+        "progress": status_groups(bundle),
+    }
+
+
+def task_root_action(bundle, action_type):
+    current_id = bundle["status"].get("current_task")
+    if not current_id:
+        raise ExError("no current task is claimed")
+    task_state = current_task_status(bundle, current_id)
+    latest_failed = [
+        record
+        for record in recorded_evidence_for_task(bundle, current_id)
+        if record.get("success") is False
+    ]
+    action = {
+        "type": action_type,
+        "active_plan": active_plan_summary(bundle),
+        "task": task_state["task"],
+        "status": task_state["summary"],
+        "task_view": task_state["view"],
+        "evidence_state": task_state["evidence_state"],
+        "notes": exec_notes_view(bundle, current_id),
+    }
+    if latest_failed:
+        action["latest_failed_evidence"] = latest_failed[-1]
+    return action
+
+
+def init_plan(plan_id, title, replace=False):
+    require_yaml()
+    validate_plan_id(plan_id)
+    plan_dir = PLAN_ROOT / plan_id
+    if plan_dir.exists():
+        if not replace:
+            raise ExError(f"{plan_dir} already exists; use --replace to recreate it")
+        shutil.rmtree(plan_dir)
+    (plan_dir / "evidence").mkdir(parents=True, exist_ok=True)
+    PLAN_ROOT.mkdir(parents=True, exist_ok=True)
+    write_yaml(EXEC_FILE, {"active_plan_id": plan_id, "plan_dir": str(plan_dir)})
+    (plan_dir / "draft.md").write_text(
+        "\n".join(
+            [
+                DRAFT_PLACEHOLDER_MARKER,
+                f"# {title}",
+                "",
+                "Draft is pending. Run `co flow next` to continue planning.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    write_yaml(
+        plan_dir / "plan.yaml",
+        {
+            "title": title,
+            "goal": "",
+            "context": [],
+            "non_goals": [],
+            "constraints": [],
+            "success_criteria": [],
+            "verification_policy": [],
+            "execution_strategy": [],
+            "stop_conditions": ["user_decision", "external_environment"],
+        },
+    )
+    write_yaml(plan_dir / "tasks.yaml", {"tasks": []})
+    write_yaml(plan_dir / "interview.yaml", default_interview())
+    write_yaml(
+        plan_dir / "status.yaml",
+        {
+            "phase": "drafting",
+            "review": default_review_state(),
+            "current_task": None,
+            "tasks": {},
+            "halt": None,
+        },
+    )
+    write_yaml(plan_dir / "notes.yaml", {"entries": []})
+    write_yaml(plan_dir / "evidence.yaml", {"records": []})
+    return plan_dir
+
+
+def track_summary_from_rounds(interview, track):
+    answers = [
+        str(item.get("answer", "")).strip()
+        for item in interview.get("rounds", [])
+        if item.get("track") == track and str(item.get("answer", "")).strip()
+    ]
+    return " / ".join(answers[-2:]) if answers else ""
+
+
+def deterministic_interview_question(interview):
+    track_counts, user_track_counts = interview_round_tracks(interview)
+    for track in INTERVIEW_REQUIRED_USER_TRACKS:
+        if user_track_counts.get(track, 0) == 0:
+            return {
+                "route": "user_decision",
+                "track": track,
+                "question": {
+                    "scope": "What exact scope should this plan include?",
+                    "outputs": "What concrete output should the executor produce?",
+                    "verification": "What evidence or command should prove the work is complete?",
+                }[track],
+            }
+    for track in INTERVIEW_REQUIRED_TRACKS:
+        if track_counts.get(track, 0) == 0:
+            return {
+                "route": "user_decision",
+                "track": track,
+                "question": {
+                    "non_goals": "What should this plan explicitly exclude?",
+                    "constraints": "What constraints must the executor preserve?",
+                    "stop_conditions": "When should execution halt instead of making a local decision?",
+                }.get(track, f"What decision should define the {track} track?"),
+            }
+    if interview.get("non_user_answer_streak", 0) >= INTERVIEW_NON_USER_STREAK_LIMIT:
+        return {
+            "route": "user_decision",
+            "track": "scope",
+            "question": "Before using more inferred facts, what user-owned decision should guide this plan?",
+        }
+    return None
+
+
+def record_interview_round(plan_dir, *, route, track, question, answer, source):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    if interview.get("status") == "closed":
+        raise ExError("interview is closed; reopen a track before recording more answers")
+    if track not in INTERVIEW_REQUIRED_TRACK_SET:
+        raise ExError(f"unknown interview track: {track}")
+    if (
+        interview.get("non_user_answer_streak", 0) >= INTERVIEW_NON_USER_STREAK_LIMIT
+        and route not in INTERVIEW_USER_ROUTES
+    ):
+        raise ExError("next interview answer must require user judgment after 3 non-user answers")
+    focus_blocker = interview_focus_blocker(interview, track)
+    if focus_blocker:
+        raise ExError(focus_blocker)
+    pending = interview.get("pending_user_question")
+    if route in INTERVIEW_USER_ROUTES:
+        if pending is None:
+            raise ExError("user-judgment answers require a pending question")
+        if pending.get("route") != route or pending.get("track") != track or pending.get("question") != question:
+            raise ExError("user-judgment answer must match the pending user question")
+        round_id = pending["id"]
+    else:
+        if pending is not None:
+            raise ExError("record the pending user answer before adding non-user interview facts")
+        round_id = next_id(interview.get("rounds", []), "Q")
+    round_item = {
+        "id": round_id,
+        "route": route,
+        "track": track,
+        "question": question,
+        "answer": answer,
+        "source": source,
+    }
+    interview.setdefault("rounds", []).append(round_item)
+    interview["non_user_answer_streak"] = (
+        interview.get("non_user_answer_streak", 0) + 1
+        if route in INTERVIEW_NON_USER_ROUTES
+        else 0
+    )
+    interview["status"] = "open"
+    interview["pending_user_question"] = None
+    interview["closure"]["ready"] = False
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    return round_item
+
+
+def score_interview_internal(plan_dir, mode="auto"):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    output = run_interview_codex_agent(
+        plan_dir,
+        interview,
+        "score",
+        score_prompt(plan_dir, mode),
+        score_schema(),
+    )
+    interview = load_yaml(plan_dir / "interview.yaml")
+    score = normalize_ambiguity_score(output, interview, mode)
+    ambiguity = interview.setdefault("ambiguity", {"latest": None, "history": []})
+    ambiguity.setdefault("history", []).append(score)
+    ambiguity["latest"] = score
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    return score
+
+
+def close_interview_if_ready(plan_dir):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    latest = interview.get("ambiguity", {}).get("latest") or {}
+    coverage = planning_context_coverage(interview)
+    if latest.get("ready") is not True:
+        return False
+    if coverage["missing_tracks"] or coverage["missing_user_decision_tracks"]:
+        return False
+    if interview.get("pending_user_question") is not None:
+        return False
+    if interview.get("closure", {}).get("material_blockers"):
+        return False
+    for track in INTERVIEW_REQUIRED_TRACKS:
+        interview["required_tracks"][track]["status"] = "closed"
+        interview["required_tracks"][track]["summary"] = track_summary_from_rounds(interview, track)
+    summary = latest.get("summary") or "Interview gates satisfied by recorded rounds and ambiguity score."
+    for check in INTERVIEW_CLOSURE_CHECKS:
+        interview["closure"]["checks"][check] = {"passed": True, "summary": summary}
+    blockers = interview_closure_blockers(interview)
+    if blockers:
+        return False
+    interview["status"] = "closed"
+    interview["closure"]["ready"] = True
+    interview["closure"]["summary"] = summary
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    return True
+
+
+def advance_interview_until_boundary(plan_dir, max_steps=8):
+    for _ in range(max_steps):
+        interview = load_yaml(plan_dir / "interview.yaml")
+        validate_interview(interview)
+        pending = interview.get("pending_user_question")
+        if pending is not None:
+            return ask_user_action(pending)
+        if interview_draft_ready(interview):
+            return None
+        question = deterministic_interview_question(interview)
+        if question:
+            pending = create_pending_question(
+                plan_dir,
+                interview,
+                question["route"],
+                question["track"],
+                question["question"],
+            )
+            return ask_user_action(pending)
+        latest = interview.get("ambiguity", {}).get("latest")
+        if not isinstance(latest, dict) or latest.get("round_count") != len(interview.get("rounds", [])):
+            score_interview_internal(plan_dir)
+            continue
+        if close_interview_if_ready(plan_dir):
+            return None
+        latest = load_yaml(plan_dir / "interview.yaml").get("ambiguity", {}).get("latest") or {}
+        followup = latest.get("recommended_followup")
+        if followup and latest.get("ready") is not True:
+            interview = load_yaml(plan_dir / "interview.yaml")
+            pending = create_pending_question(
+                plan_dir,
+                interview,
+                followup["route"],
+                followup["track"],
+                followup["question"],
+            )
+            return ask_user_action(pending)
+        interview = load_yaml(plan_dir / "interview.yaml")
+        output = run_interview_codex_agent(
+            plan_dir,
+            interview,
+            "ask-next",
+            ask_next_prompt(plan_dir),
+            ask_next_schema(),
+        )
+        if output["action"] == "ask_user":
+            interview = load_yaml(plan_dir / "interview.yaml")
+            pending = create_pending_question(
+                plan_dir,
+                interview,
+                output["route"],
+                output["track"],
+                output["question"],
+            )
+            return ask_user_action(pending)
+        if output["action"] == "record_fact":
+            record_interview_round(
+                plan_dir,
+                route=output["route"],
+                track=output["track"],
+                question=output["question"],
+                answer=output["answer"],
+                source=output["source"],
+            )
+            continue
+        if output["action"] == "ready_for_score":
+            score_interview_internal(plan_dir)
+            continue
+    raise ExError("interview flow did not reach a root boundary")
+
+
+def bundle_author_schema():
+    string_array = {"type": "array", "items": {"type": "string"}}
+    task = {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "id": {"type": "string"},
+            "kind": {"type": "string", "enum": ["execution", "checkpoint", "final_verification"]},
+            "title": {"type": "string"},
+            "depends_on": string_array,
+            "start_when": {"type": "object", "additionalProperties": True},
+            "files": {"type": "object", "additionalProperties": True},
+            "context": {"type": "string"},
+            "must_do": string_array,
+            "must_not_do": string_array,
+            "implementation_notes": string_array,
+            "verification": {"type": "object", "additionalProperties": True},
+            "acceptance_criteria": string_array,
+            "expected_evidence": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "reopen_when": string_array,
+        },
+        "required": [
+            "id",
+            "kind",
+            "title",
+            "depends_on",
+            "start_when",
+            "files",
+            "context",
+            "must_do",
+            "must_not_do",
+            "implementation_notes",
+            "verification",
+            "acceptance_criteria",
+            "expected_evidence",
+            "reopen_when",
+        ],
+    }
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "draft_markdown": {"type": "string"},
+            "plan": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "title": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "context": string_array,
+                    "non_goals": string_array,
+                    "constraints": string_array,
+                    "success_criteria": string_array,
+                    "verification_policy": string_array,
+                    "execution_strategy": string_array,
+                    "stop_conditions": string_array,
+                },
+                "required": [
+                    "title",
+                    "goal",
+                    "context",
+                    "non_goals",
+                    "constraints",
+                    "success_criteria",
+                    "verification_policy",
+                    "execution_strategy",
+                    "stop_conditions",
+                ],
+            },
+            "tasks": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"tasks": {"type": "array", "items": task}},
+                "required": ["tasks"],
+            },
+            "summary": {"type": "string"},
+        },
+        "required": ["draft_markdown", "plan", "tasks", "summary"],
+    }
+
+
+def bundle_author_prompt(plan_dir, review_results=None, feedback=None):
+    extra = ""
+    if review_results:
+        extra += "\nPre-draft review findings to fix:\n" + dump_json(review_results)
+    if feedback:
+        extra += "\nUser draft feedback to apply:\n" + feedback
+    return (
+        "You are the coplan bundle_author. Produce final draft.md, plan.yaml, and tasks.yaml content as JSON only.\n"
+        "Inspect the repository if needed. Do not edit files directly. Do not leave TBD placeholders.\n"
+        "Every task must satisfy the coflow task schema and include at least one final_verification task.\n"
+        "Keep execution decisions static so the executor does not need to plan.\n\n"
+        f"Context:\n{agent_context(plan_dir)}"
+        f"{extra}"
+    )
+
+
+def write_authored_bundle(plan_dir, output):
+    draft = str(output.get("draft_markdown", "")).strip() + "\n"
+    if not draft.strip() or DRAFT_PLACEHOLDER_MARKER in draft:
+        raise ExError("bundle_author returned invalid draft_markdown")
+    plan = output.get("plan")
+    tasks = output.get("tasks")
+    if not isinstance(plan, dict) or not isinstance(tasks, dict):
+        raise ExError("bundle_author must return plan and tasks mappings")
+    validate_plan(plan)
+    validate_tasks(tasks)
+    plan_id, active_dir = active_plan()
+    title = plan.get("title") or active_dir.name.replace("-", " ").title()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    context = build_planning_context(plan_id, plan_dir, title, interview)
+    write_yaml(plan_dir / "planning_context.yaml", context)
+    (plan_dir / "draft.md").write_text(draft, encoding="utf-8")
+    write_yaml(plan_dir / "plan.yaml", plan)
+    write_yaml(plan_dir / "tasks.yaml", tasks)
+    sync_status_tasks(plan_dir, tasks)
+    reset_review_status(plan_dir)
+
+
+def validate_bundle_internal(plan_dir):
+    require_interview_closed(plan_dir, "flow validation")
+    validate_draft_markdown(plan_dir)
+    plan = load_yaml(plan_dir / "plan.yaml")
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    status = load_yaml(plan_dir / "status.yaml")
+    validate_plan(plan)
+    validate_tasks(tasks)
+    validate_status(status, tasks)
+
+
+def run_review_internal(plan_dir):
+    validate_bundle_internal(plan_dir)
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    status = load_yaml(plan_dir / "status.yaml")
+    reviewer_outputs = run_codex_agents_parallel(
+        [
+            {"role": reviewer, "prompt": reviewer_prompt(plan_dir, reviewer), "schema": review_schema()}
+            for reviewer in REQUIRED_REVIEWERS
+        ],
+        cwd=Path.cwd(),
+    )
+    results = []
+    passed_reviewers = []
+    for reviewer in REQUIRED_REVIEWERS:
+        result = reviewer_outputs[reviewer]["output"]
+        review_status = result["status"]
+        if review_status == "PASS":
+            passed_reviewers.append(reviewer)
+        results.append({"reviewer": reviewer, **result})
+        append_note(
+            plan_dir,
+            "decision" if review_status == "PASS" else "risk",
+            f"{reviewer} {review_status}: {result['summary']}",
+            "Codex CLI pre-draft plan review.",
+            ["plan.yaml", "tasks.yaml"],
+            "co flow next",
+        )
+    previous_status = status
+    status = load_yaml(plan_dir / "status.yaml")
+    status["review"] = {
+        **default_review_state(),
+        "status": "passed" if len(passed_reviewers) == len(REQUIRED_REVIEWERS) else "failed",
+        "stage": "pre-draft",
+        "required_reviewers": list(REQUIRED_REVIEWERS),
+        "passed_reviewers": passed_reviewers,
+        "last_run_id": next_review_run_id(previous_status),
+        "fingerprint": review_fingerprint(plan_dir) if len(passed_reviewers) == len(REQUIRED_REVIEWERS) else None,
+    }
+    validate_status(status, tasks)
+    write_yaml(plan_dir / "status.yaml", status)
+    return {"review": status["review"], "results": results}
+
+
+def author_and_review_until_boundary(plan_dir, feedback=None):
+    review_results = None
+    for _ in range(2):
+        output = run_codex_agent(
+            "bundle_author",
+            bundle_author_prompt(plan_dir, review_results=review_results, feedback=feedback),
+            bundle_author_schema(),
+            cwd=Path.cwd(),
+        )["output"]
+        write_authored_bundle(plan_dir, output)
+        review = run_review_internal(plan_dir)
+        if review["review"]["status"] == "passed":
+            status = load_yaml(plan_dir / "status.yaml")
+            status["phase"] = "draft_review"
+            validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
+            write_yaml(plan_dir / "status.yaml", status)
+            return {
+                "review": review["review"],
+                "author_summary": output.get("summary", ""),
+                "root_action": present_draft_action(plan_dir),
+            }
+        review_results = review["results"]
+    interview = load_yaml(plan_dir / "interview.yaml")
+    interview["status"] = "open"
+    interview["closure"]["ready"] = False
+    interview["required_tracks"]["scope"]["status"] = "open"
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    pending = create_pending_question(
+        plan_dir,
+        load_yaml(plan_dir / "interview.yaml"),
+        "user_decision",
+        "scope",
+        "Pre-draft review still found unresolved plan decisions. What should the executor do differently?",
+    )
+    return {"review_results": review_results, "root_action": ask_user_action(pending)}
+
+
+def planner_needs_authoring(plan_dir):
+    status = load_yaml(plan_dir / "status.yaml")
+    if status.get("review", {}).get("status") != "passed":
+        return True
+    try:
+        validate_bundle_internal(plan_dir)
+        require_review_passed(plan_dir, status, "flow")
+    except ExError:
+        return True
+    return False
+
+
+def approve_and_finalize(plan_dir, comment):
+    require_interview_closed(plan_dir, "draft approval")
+    validate_draft_markdown(plan_dir)
+    status = load_yaml(plan_dir / "status.yaml")
+    require_review_passed(plan_dir, status, "draft approval")
+    status["phase"] = "planning"
+    validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
+    write_yaml(plan_dir / "status.yaml", status)
+    append_note(
+        plan_dir,
+        "decision",
+        comment or "Draft approved.",
+        "Draft approval comment.",
+        ["draft.md", "status.yaml#phase"],
+        "co flow respond",
+    )
+    plan = load_yaml(plan_dir / "plan.yaml")
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    status = load_yaml(plan_dir / "status.yaml")
+    validate_plan(plan)
+    validate_tasks(tasks)
+    validate_status(status, tasks)
+    require_draft_approved(status)
+    require_review_passed(plan_dir, status, "flow finalize")
+    status["phase"] = "ready_for_exec"
+    write_yaml(plan_dir / "status.yaml", status)
+
+
+def feedback_schema():
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "action": {"type": "string", "enum": ["approve", "wording_change", "meaning_change"]},
+            "track": {"type": "string", "enum": list(INTERVIEW_REQUIRED_TRACKS)},
+            "question": {"type": "string"},
+            "answer": {"type": "string"},
+            "summary": {"type": "string"},
+        },
+        "required": ["action", "track", "question", "answer", "summary"],
+    }
+
+
+def classify_draft_feedback(plan_dir, feedback):
+    normalized = feedback.strip().lower()
+    approval_words = {"approve", "approved", "yes", "ok", "ship", "looks good", "승인", "좋아", "좋습니다", "확정"}
+    if normalized in approval_words:
+        return {
+            "action": "approve",
+            "track": "scope",
+            "question": "",
+            "answer": feedback,
+            "summary": "Draft approved.",
+        }
+    prompt = (
+        "Classify this draft feedback for coflow. Return JSON only.\n"
+        "approve means the user accepts the draft. wording_change means text-only polish. "
+        "meaning_change means scope, output, verification, constraints, or stop conditions changed.\n\n"
+        f"Draft:\n{read_text_file(plan_dir / 'draft.md')}\n\nFeedback:\n{feedback}"
+    )
+    return run_codex_agent("draft_feedback", prompt, feedback_schema(), cwd=Path.cwd())["output"]
+
+
+def apply_draft_feedback(plan_dir, feedback):
+    classification = classify_draft_feedback(plan_dir, feedback)
+    action = classification["action"]
+    if action == "approve":
+        approve_and_finalize(plan_dir, classification.get("summary") or feedback)
+        return {"feedback": classification}
+    if action == "wording_change":
+        append_note(
+            plan_dir,
+            "revision",
+            classification.get("summary") or feedback,
+            "User requested wording-only draft feedback.",
+            ["draft.md"],
+            "co flow respond",
+        )
+        result = author_and_review_until_boundary(plan_dir, feedback=feedback)
+        result["feedback"] = classification
+        return result
+    track = classification["track"]
+    interview = load_yaml(plan_dir / "interview.yaml")
+    interview["status"] = "open"
+    interview["closure"]["ready"] = False
+    interview["closure"]["summary"] = ""
+    interview["required_tracks"][track]["status"] = "open"
+    interview["required_tracks"][track]["summary"] = ""
+    status = load_yaml(plan_dir / "status.yaml")
+    status["phase"] = "drafting"
+    validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
+    write_yaml(plan_dir / "status.yaml", status)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    pending = create_pending_question(
+        plan_dir,
+        load_yaml(plan_dir / "interview.yaml"),
+        "user_decision",
+        track,
+        classification["question"] or "What should change in the approved plan contract?",
+    )
+    record_interview_round(
+        plan_dir,
+        route=pending["route"],
+        track=pending["track"],
+        question=pending["question"],
+        answer=classification["answer"] or feedback,
+        source="from-user:co-flow-draft-feedback",
+    )
+    return {"feedback": classification}
+
+
+def start_execution_internal(plan_dir):
+    status = load_yaml(plan_dir / "status.yaml")
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    validate_status(status, tasks)
+    if status["phase"] != "ready_for_exec":
+        raise ExError("execution can start only from ready_for_exec")
+    status["phase"] = "executing"
+    write_yaml(plan_dir / "status.yaml", status)
+
+
+def claim_task_internal(bundle, task_id):
+    if bundle["status"].get("phase") != "executing":
+        raise ExError("tasks can be claimed only while phase is executing")
+    if bundle["status"].get("current_task"):
+        raise ExError(f"current task is already Doing: {bundle['status']['current_task']}")
+    task = find_task(bundle, task_id)
+    if task not in ready_tasks(bundle):
+        raise ExError(f"task is not ready: {task_id}")
+    status = bundle["status"]
+    status["current_task"] = task_id
+    status["tasks"][task_id] = "Doing"
+    write_yaml(bundle["plan_dir"] / "status.yaml", status)
+
+
+def complete_task_internal(bundle, task_id):
+    status = bundle["status"]
+    task = find_task(bundle, task_id)
+    if status.get("current_task") != task_id or task_status(bundle).get(task_id) != "Doing":
+        raise ExError(f"task is not currently Doing: {task_id}")
+    missing = required_evidence_missing(bundle, task)
+    if missing:
+        raise ExError("required evidence missing: " + ", ".join(missing))
+    status["tasks"][task_id] = "Done"
+    status["current_task"] = None
+    write_yaml(bundle["plan_dir"] / "status.yaml", status)
+
+
+def finish_internal(bundle):
+    if bundle["status"].get("phase") == "halted":
+        raise ExError("cannot finish while phase is halted")
+    if not can_finish(bundle):
+        remaining = [task_id for task_id, state in task_status(bundle).items() if state != "Done"]
+        finals = [task["id"] for task in final_tasks(bundle) if task_status(bundle).get(task["id"]) != "Done"]
+        raise ExError(f"cannot finish; remaining={remaining}, final_verification_remaining={finals}")
+    status = bundle["status"]
+    status["phase"] = "complete"
+    status["current_task"] = None
+    write_yaml(bundle["plan_dir"] / "status.yaml", status)
+
+
+def evidence_name_for_step(task, step_id):
+    for expected in expected_evidence_for_task(task):
+        if expected.get("step_id") == step_id:
+            artifact = Path(expected["file"])
+            if len(artifact.parts) >= 2 and artifact.parts[0] == "evidence":
+                return str(Path(*artifact.parts[1:]))
+            return str(artifact)
+    return f"{task['id'].lower()}-{step_id}.txt"
+
+
+def record_current_evidence(step_id, command, exit_code, success):
+    bundle = load_bundle()
+    current_id = bundle["status"].get("current_task")
+    if not current_id:
+        raise ExError("evidence requires a current Doing task")
+    task = find_task(bundle, current_id)
+    task_step(task, step_id)
+    if task_status(bundle).get(current_id) != "Doing":
+        raise ExError("evidence can be added only for a Doing task")
+    name = safe_evidence_name(evidence_name_for_step(task, step_id))
+    artifact = Path("evidence") / name
+    artifact_path = bundle["plan_dir"] / artifact
+    artifact_path.parent.mkdir(parents=True, exist_ok=True)
+    artifact_path.write_text(read_stdin(), encoding="utf-8")
+    evidence = bundle["evidence"]
+    records = evidence.setdefault("records", [])
+    record = {
+        "id": next_id(records, "V"),
+        "task_id": current_id,
+        "step_id": step_id,
+        "command": command,
+        "exit_code": exit_code,
+        "success": normalize_bool(success),
+        "artifact": str(artifact),
+        "satisfies": [],
+    }
+    records.append(record)
+    write_yaml(bundle["plan_dir"] / "evidence.yaml", evidence)
+    if not record["success"]:
+        append_note(
+            bundle["plan_dir"],
+            "risk",
+            f"Verification failed for {current_id}/{step_id}.",
+            f"Command exited {exit_code}: {command}",
+            [f"task:{current_id}", "evidence.yaml", str(artifact)],
+            "co flow evidence",
+        )
+    return record
+
+
+def advance_executor_until_boundary():
+    for _ in range(8):
+        bundle = load_bundle()
+        phase = bundle["status"].get("phase")
+        if phase == "ready_for_exec":
+            start_execution_internal(bundle["plan_dir"])
+            continue
+        if phase == "executing":
+            current_id = bundle["status"].get("current_task")
+            if current_id:
+                return {"root_action": task_root_action(bundle, "execute_task")}
+            ready = ready_tasks(bundle)
+            if ready:
+                claim_task_internal(bundle, ready[0]["id"])
+                continue
+            if can_finish(bundle):
+                finish_internal(bundle)
+                continue
+            raise ExError("execution has no current task, ready task, or finish gate")
+        if phase == "halted":
+            return {"root_action": report_halt_action(bundle)}
+        if phase == "complete":
+            return {"root_action": report_complete_action(bundle)}
+        raise ExError(f"phase is not executable: {phase}")
+    raise ExError("executor flow did not reach a root boundary")
+
+
+def advance_planner_until_boundary(feedback=None):
+    plan_id, plan_dir = active_plan()
+    status = load_yaml(plan_dir / "status.yaml")
+    phase = status.get("phase")
+    if phase == "draft_review":
+        return {"root_action": present_draft_action(plan_dir)}
+    if phase == "planning":
+        approve_and_finalize(plan_dir, "Draft already approved.")
+        return advance_executor_until_boundary()
+    if phase != "drafting":
+        raise ExError(f"phase is not plannable: {phase}")
+    action = advance_interview_until_boundary(plan_dir)
+    if action:
+        return {"root_action": action}
+    if planner_needs_authoring(plan_dir) or feedback:
+        result = author_and_review_until_boundary(plan_dir, feedback=feedback)
+        return result
+    status = load_yaml(plan_dir / "status.yaml")
+    status["phase"] = "draft_review"
+    validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
+    write_yaml(plan_dir / "status.yaml", status)
+    return {"root_action": present_draft_action(plan_dir)}
+
+
+def advance_flow_until_boundary(feedback=None):
+    _, plan_dir = active_plan()
+    phase = load_yaml(plan_dir / "status.yaml").get("phase")
+    if phase in {"drafting", "draft_review", "planning"}:
+        result = advance_planner_until_boundary(feedback=feedback)
+        if result["root_action"]["type"] in {"ask_user", "present_draft"}:
+            return result
+        return advance_flow_until_boundary()
+    return advance_executor_until_boundary()
+
+
+def status_flow_boundary():
+    bundle = load_bundle()
+    phase = bundle["status"].get("phase")
+    if phase == "drafting":
+        pending = bundle["interview"].get("pending_user_question")
+        action = ask_user_action(pending) if pending else continue_flow_action("Run `co flow next` to continue planning.")
+    elif phase == "draft_review":
+        action = present_draft_action(bundle["plan_dir"])
+    elif phase in {"planning", "ready_for_exec"}:
+        action = continue_flow_action("Run `co flow next` to continue mechanical transitions.")
+    elif phase == "executing":
+        current_id = bundle["status"].get("current_task")
+        action = task_root_action(bundle, "execute_task") if current_id else continue_flow_action("Run `co flow next` to claim or finish.")
+    elif phase == "halted":
+        action = report_halt_action(bundle)
+    elif phase == "complete":
+        action = report_complete_action(bundle)
+    else:
+        action = continue_flow_action("Run `co flow next` after fixing the current phase.")
+    return {"root_action": action}
+
+
+def print_flow_boundary(result, extra=None):
+    bundle = load_bundle()
+    action = result["root_action"]
+    data = {
+        "active_plan": active_plan_summary(bundle),
+        "phase": bundle["status"].get("phase"),
+        "progress": status_groups(bundle),
+    }
+    if extra:
+        data.update(extra)
+    for key, value in result.items():
+        if key != "root_action":
+            data[key] = value
+    print_flow_result(data, action, mode=flow_mode_from_phase(bundle["status"].get("phase")))
+
+
+def flow_init(args):
+    plan_dir = init_plan(args.plan_id, args.title, args.replace)
+    print_flow_result(
+        {"active_plan_id": args.plan_id, "plan_dir": str(plan_dir), "phase": "drafting"},
+        continue_flow_action("Run `co flow next` to continue planning."),
+        mode="planner",
+    )
+
+
+def flow_next(_args):
+    result = advance_flow_until_boundary()
+    print_flow_boundary(result)
+
+
+def flow_status(_args):
+    result = status_flow_boundary()
+    print_flow_boundary(result)
+
+
+def flow_respond(args):
+    if not args.stdin:
+        raise ExError("flow respond requires --stdin")
+    response = read_stdin().strip()
+    if not response:
+        raise ExError("flow respond requires a non-empty response on stdin")
+    _, plan_dir = active_plan()
+    status = load_yaml(plan_dir / "status.yaml")
+    phase = status.get("phase")
+    if phase == "draft_review":
+        feedback_result = apply_draft_feedback(plan_dir, response)
+        if feedback_result.get("root_action"):
+            print_flow_boundary(feedback_result)
+            return
+        result = advance_flow_until_boundary()
+        print_flow_boundary(result, extra={"feedback": feedback_result.get("feedback")})
+        return
+    interview = load_yaml(plan_dir / "interview.yaml")
+    pending = interview.get("pending_user_question")
+    if pending is None:
+        raise ExError("no pending user question or draft review is waiting for response")
+    record_interview_round(
+        plan_dir,
+        route=pending["route"],
+        track=pending["track"],
+        question=pending["question"],
+        answer=response,
+        source="from-user:co-flow-respond",
+    )
+    result = advance_flow_until_boundary()
+    print_flow_boundary(result)
+
+
+def flow_evidence(args):
+    if not args.stdin:
+        raise ExError("flow evidence requires --stdin")
+    record = record_current_evidence(args.step, args.command, args.exit_code, args.success)
+    if not record["success"]:
+        bundle = load_bundle()
+        print_flow_boundary({"root_action": task_root_action(bundle, "repair_task")}, extra={"record": record})
+        return
+    bundle = load_bundle()
+    current_id = bundle["status"].get("current_task")
+    if current_id:
+        task = find_task(bundle, current_id)
+        if not required_evidence_missing(bundle, task):
+            complete_task_internal(bundle, current_id)
+    result = advance_flow_until_boundary()
+    print_flow_boundary(result, extra={"record": record})
+
+
+def flow_repair(args):
+    bundle = load_bundle()
+    current_id = bundle["status"].get("current_task")
+    if not current_id:
+        raise ExError("flow repair requires a current Doing task")
+    if args.set_value is None and args.add_value is None and args.remove_value is None:
+        raise ExError("repair requires one of --set, --add, or --remove")
+    task = find_task(bundle, current_id)
+    if args.set_value is not None:
+        set_nested(task, args.field, parse_yaml_value(args.set_value))
+    elif args.add_value is not None:
+        set_nested(task, args.field, parse_yaml_value(args.add_value), add=True)
+    else:
+        set_nested(task, args.field, parse_yaml_value(args.remove_value), remove=True)
+    validate_tasks(bundle["tasks"])
+    write_yaml(bundle["plan_dir"] / "tasks.yaml", bundle["tasks"])
+    note = append_note(
+        bundle["plan_dir"],
+        "repair",
+        f"Repaired {current_id} field {args.field}.",
+        args.reason,
+        [f"task:{current_id}", f"tasks.yaml#{current_id}.{args.field}"],
+        "co flow repair",
+    )
+    bundle = load_bundle()
+    print_flow_boundary({"root_action": task_root_action(bundle, "execute_task")}, extra={"note": note})
+
+
+def flow_halt(args):
+    bundle = load_bundle()
+    current_id = bundle["status"].get("current_task")
+    if args.kind not in {"user_decision", "external_environment"}:
+        raise ExError("halt kind must be user_decision or external_environment")
+    if current_id:
+        find_task(bundle, current_id)
+    status = bundle["status"]
+    status["phase"] = "halted"
+    status["halt"] = {"kind": args.kind, "task": current_id, "reason": args.reason}
+    write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    note = append_note(
+        bundle["plan_dir"],
+        "halt",
+        f"Execution halted: {args.reason}",
+        args.kind,
+        [item for item in [f"task:{current_id}" if current_id else None, "status.yaml#halt"] if item],
+        "co flow halt",
+    )
+    bundle = load_bundle()
+    print_flow_boundary({"root_action": report_halt_action(bundle)}, extra={"note": note})
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="co")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -2630,143 +3705,45 @@ def build_parser():
     doctor = sub.add_parser("doctor")
     doctor.set_defaults(func=command_doctor)
 
-    planner = sub.add_parser("planner")
-    planner_sub = planner.add_subparsers(dest="planner_command", required=True)
+    flow = sub.add_parser("flow")
+    flow_sub = flow.add_subparsers(dest="flow_command", required=True)
 
-    init = planner_sub.add_parser("init")
-    init.add_argument("--plan-id", required=True)
-    init.add_argument("--title", required=True)
-    init.add_argument("--replace", action="store_true")
-    init.set_defaults(func=planner_init)
+    flow_init_parser = flow_sub.add_parser("init")
+    flow_init_parser.add_argument("--plan-id", required=True)
+    flow_init_parser.add_argument("--title", required=True)
+    flow_init_parser.add_argument("--replace", action="store_true")
+    flow_init_parser.set_defaults(func=flow_init)
 
-    interview = planner_sub.add_parser("interview")
-    interview_sub = interview.add_subparsers(dest="interview_command", required=True)
-    interview_status = interview_sub.add_parser("status")
-    interview_status.set_defaults(func=planner_interview_status)
-    interview_ask_next = interview_sub.add_parser("ask-next")
-    interview_ask_next.set_defaults(func=planner_interview_ask_next)
-    interview_score = interview_sub.add_parser("score")
-    interview_score.add_argument("--mode", choices=["auto", "greenfield", "brownfield"], default="auto")
-    interview_score.set_defaults(func=planner_interview_score)
-    interview_ask = interview_sub.add_parser("ask")
-    interview_ask.add_argument("--route", choices=sorted(INTERVIEW_USER_ROUTES), required=True)
-    interview_ask.add_argument("--track", choices=INTERVIEW_REQUIRED_TRACKS, required=True)
-    interview_ask.add_argument("--question", required=True)
-    interview_ask.set_defaults(func=planner_interview_ask)
-    interview_record = interview_sub.add_parser("record")
-    interview_record.add_argument("--route", choices=sorted(INTERVIEW_ROUTES), required=True)
-    interview_record.add_argument("--track", choices=INTERVIEW_REQUIRED_TRACKS, required=True)
-    interview_record.add_argument("--question", required=True)
-    interview_record.add_argument("--answer", required=True)
-    interview_record.add_argument("--source", required=True)
-    interview_record.set_defaults(func=planner_interview_record)
-    interview_track = interview_sub.add_parser("track")
-    interview_track_sub = interview_track.add_subparsers(dest="track_action", required=True)
-    interview_track_close = interview_track_sub.add_parser("close")
-    interview_track_close.add_argument("track", choices=INTERVIEW_REQUIRED_TRACKS)
-    interview_track_close.add_argument("--summary", required=True)
-    interview_track_close.set_defaults(func=planner_interview_track)
-    interview_track_open = interview_track_sub.add_parser("open")
-    interview_track_open.add_argument("track", choices=INTERVIEW_REQUIRED_TRACKS)
-    interview_track_open.add_argument("--reason", required=True)
-    interview_track_open.set_defaults(func=planner_interview_track)
-    interview_closure_check = interview_sub.add_parser("closure-check")
-    interview_closure_check.add_argument("check", choices=INTERVIEW_CLOSURE_CHECKS)
-    interview_closure_check.add_argument("--summary", required=True)
-    interview_closure_check.set_defaults(func=planner_interview_closure_check)
-    interview_blocker = interview_sub.add_parser("blocker")
-    interview_blocker_sub = interview_blocker.add_subparsers(dest="blocker_action", required=True)
-    interview_blocker_add = interview_blocker_sub.add_parser("add")
-    interview_blocker_add.add_argument("--reason", required=True)
-    interview_blocker_add.set_defaults(func=planner_interview_blocker)
-    interview_blocker_clear = interview_blocker_sub.add_parser("clear")
-    interview_blocker_clear.add_argument("--reason", required=True)
-    interview_blocker_clear.set_defaults(func=planner_interview_blocker)
-    interview_close = interview_sub.add_parser("close")
-    interview_close.add_argument("--summary", required=True)
-    interview_close.set_defaults(func=planner_interview_close)
+    flow_next_parser = flow_sub.add_parser("next")
+    flow_next_parser.set_defaults(func=flow_next)
 
-    generate_skeleton = planner_sub.add_parser("generate-skeleton")
-    generate_skeleton.set_defaults(func=planner_generate_skeleton)
+    flow_status_parser = flow_sub.add_parser("status")
+    flow_status_parser.set_defaults(func=flow_status)
 
-    review = planner_sub.add_parser("review")
-    review_sub = review.add_subparsers(dest="review_command", required=True)
-    review_run = review_sub.add_parser("run")
-    review_run.add_argument("--stage", choices=["pre-draft"], required=True)
-    review_run.set_defaults(func=planner_review_run)
-    review_status = review_sub.add_parser("status")
-    review_status.set_defaults(func=planner_review_status)
+    flow_respond_parser = flow_sub.add_parser("respond")
+    flow_respond_parser.add_argument("--stdin", action="store_true")
+    flow_respond_parser.set_defaults(func=flow_respond)
 
-    approve = planner_sub.add_parser("approve-draft")
-    approve.add_argument("--comment", default="")
-    approve.set_defaults(func=planner_approve_draft)
+    flow_evidence_parser = flow_sub.add_parser("evidence")
+    flow_evidence_parser.add_argument("--step", required=True)
+    flow_evidence_parser.add_argument("--command", required=True)
+    flow_evidence_parser.add_argument("--exit-code", type=int, required=True)
+    flow_evidence_parser.add_argument("--success", choices=["true", "false"], required=True)
+    flow_evidence_parser.add_argument("--stdin", action="store_true")
+    flow_evidence_parser.set_defaults(func=flow_evidence)
 
-    finalize = planner_sub.add_parser("finalize")
-    finalize.set_defaults(func=planner_finalize)
+    flow_repair_parser = flow_sub.add_parser("repair")
+    flow_repair_parser.add_argument("--field", required=True)
+    flow_repair_parser.add_argument("--reason", required=True)
+    flow_repair_parser.add_argument("--set", dest="set_value")
+    flow_repair_parser.add_argument("--add", dest="add_value")
+    flow_repair_parser.add_argument("--remove", dest="remove_value")
+    flow_repair_parser.set_defaults(func=flow_repair)
 
-    validate = planner_sub.add_parser("validate")
-    validate.set_defaults(func=planner_validate)
-
-    note = sub.add_parser("note")
-    note_sub = note.add_subparsers(dest="note_command", required=True)
-    note_append_parser = note_sub.add_parser("append")
-    note_append_parser.add_argument("kind", choices=sorted(NOTE_KINDS - {"repair", "halt"}))
-    note_append_parser.add_argument("--text", required=True)
-    note_append_parser.add_argument("--why", required=True)
-    note_append_parser.add_argument("--affects", action="append")
-    note_append_parser.add_argument("--source", required=True)
-    note_append_parser.set_defaults(func=note_append)
-    note_list_parser = note_sub.add_parser("list")
-    note_list_parser.add_argument("--kind", choices=sorted(NOTE_KINDS))
-    note_list_parser.add_argument("--task")
-    note_list_parser.add_argument("--limit", type=int)
-    note_list_parser.set_defaults(func=note_list)
-
-    exec_parser = sub.add_parser("exec")
-    exec_sub = exec_parser.add_subparsers(dest="exec_command", required=True)
-
-    start = exec_sub.add_parser("start")
-    start.set_defaults(func=exec_start)
-    status = exec_sub.add_parser("status")
-    status.set_defaults(func=exec_status)
-    ready = exec_sub.add_parser("ready")
-    ready.set_defaults(func=exec_ready)
-    show_task = exec_sub.add_parser("show-task")
-    show_task.add_argument("task_id")
-    show_task.set_defaults(func=exec_show_task)
-    claim = exec_sub.add_parser("claim")
-    claim.add_argument("task_id")
-    claim.set_defaults(func=exec_claim)
-    evidence = exec_sub.add_parser("evidence")
-    evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
-    evidence_add = evidence_sub.add_parser("add")
-    evidence_add.add_argument("--task", required=True)
-    evidence_add.add_argument("--step", required=True)
-    evidence_add.add_argument("--name", required=True)
-    evidence_add.add_argument("--command", required=True)
-    evidence_add.add_argument("--exit-code", type=int, required=True)
-    evidence_add.add_argument("--success", choices=["true", "false"], required=True)
-    evidence_add.add_argument("--satisfies", action="append")
-    evidence_add.add_argument("--stdin", action="store_true", required=True)
-    evidence_add.set_defaults(func=exec_evidence_add)
-    repair = exec_sub.add_parser("repair")
-    repair.add_argument("task_id")
-    repair.add_argument("--field", required=True)
-    repair.add_argument("--reason", required=True)
-    repair.add_argument("--set", dest="set_value")
-    repair.add_argument("--add", dest="add_value")
-    repair.add_argument("--remove", dest="remove_value")
-    repair.set_defaults(func=exec_repair)
-    complete = exec_sub.add_parser("complete-task")
-    complete.add_argument("task_id")
-    complete.set_defaults(func=exec_complete_task)
-    halt = exec_sub.add_parser("halt")
-    halt.add_argument("--kind", choices=["user_decision", "external_environment"], required=True)
-    halt.add_argument("--task")
-    halt.add_argument("--reason", required=True)
-    halt.set_defaults(func=exec_halt)
-    finish = exec_sub.add_parser("finish")
-    finish.set_defaults(func=exec_finish)
+    flow_halt_parser = flow_sub.add_parser("halt")
+    flow_halt_parser.add_argument("--kind", choices=["user_decision", "external_environment"], required=True)
+    flow_halt_parser.add_argument("--reason", required=True)
+    flow_halt_parser.set_defaults(func=flow_halt)
 
     return parser
 
@@ -2775,13 +3752,25 @@ def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        if getattr(args, "command", None) != "doctor":
+            require_yaml()
         args.func(args)
     except GateError as exc:
         data = {"ok": False, "error": str(exc)}
         data.update(exc.data)
-        print_result(data, exc.required_action, exc.next_command)
+        if getattr(args, "command", None) == "flow":
+            print_flow_result(
+                data,
+                continue_flow_action(exc.required_action),
+                mode="error",
+            )
+        else:
+            print_result(data, exc.required_action, exc.next_command)
         return 1
     except ExError as exc:
+        if getattr(args, "command", None) == "flow":
+            print_flow_error(str(exc))
+            return 1
         sys.stdout.write("ok: false\n")
         sys.stdout.write("error: " + repr(str(exc)) + "\n")
         sys.stdout.write(

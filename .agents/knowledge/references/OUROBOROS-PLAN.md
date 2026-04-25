@@ -102,7 +102,7 @@ Ouroboros interview and seed generation code:
 
 Use this mapping when comparing designs:
 
-- Ouroboros `InterviewEngine` maps to coflow `co planner interview ...`.
+- Ouroboros `InterviewEngine` maps to coflow internal interview handling behind `co flow next/respond`.
 - Ouroboros ambiguity threshold maps to coflow `AMBIGUITY_THRESHOLD`.
 - Ouroboros clarity floors map to coflow `AMBIGUITY_FLOORS`.
 - Ouroboros Seed maps conceptually to coflow finalized `draft.md`, `plan.yaml`, and `tasks.yaml`.

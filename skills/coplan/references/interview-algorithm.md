@@ -1,6 +1,6 @@
 # Interview Algorithm
 
-Use this algorithm during `coplan` planning. It mirrors the Ouroboros ambiguity philosophy with a lightweight `codex exec` backend.
+This is a maintenance reference for `co flow` internals. It is not root-agent workflow guidance.
 
 ## Routing
 
@@ -15,23 +15,23 @@ Route each material question through exactly one path:
 
 When any part of a question requires judgment, route the whole round as `user_decision` or `code_plus_decision`.
 
-## Loop
+## Internal Loop
 
-1. Explore local repo facts before the first interview question.
-2. Run `co planner interview status`.
-3. Run `co planner interview ask-next`.
-4. If the result creates a pending question, ask the user that exact question.
-5. Record the matching answer with `co planner interview record`.
-6. If the result is `ready_for_score`, run `co planner interview score --mode auto`.
-7. After any material round, run `co planner interview score --mode auto`.
-8. Close only tracks that are execution-clear.
-9. Pass closure challenge items with `co planner interview closure-check`.
-10. If ambiguity is not ready, ask the follow-up that targets the weakest dimension.
-11. Repeat until ambiguity, tracks, floors, closure checks, and root acceptance all pass.
+`co flow next/respond` owns this loop:
+
+1. Return an existing pending user question as `root_action.type: ask_user`.
+2. Ask deterministic missing-track questions before scoring when required coverage is absent.
+3. Run the interview action agent only when deterministic coverage does not choose the next step.
+4. Record safe `code_fact` or `research_confirmation` rounds internally.
+5. Record user answers only from pending question metadata owned by `co flow`.
+6. Run ambiguity scoring when the round count changes.
+7. If ambiguity is not ready, create the recommended follow-up as a pending user question.
+8. If ambiguity and coverage are ready, close tracks, pass closure checks, and close the interview.
+9. Continue to bundle authoring without returning control to root.
 
 ## Ambiguity Math
 
-The interview does not close when the planner feels ready. It closes when weighted ambiguity says the bundle can become executable.
+The interview closes when weighted ambiguity says the bundle can become executable.
 
 ```text
 weighted_clarity = sum(clarity_i * weight_i)
@@ -66,7 +66,7 @@ Required floors:
 
 - Every required track has at least one round.
 - `scope`, `outputs`, and `verification` each have user-judgment rounds.
-- `pending_user_question` is `null`.
+- `pending_user_question` is `null` before close.
 - `source` matches the route prefix.
 - After 3 consecutive `code_fact` or `research_confirmation` rounds, the next round must require user judgment.
 - After 2 consecutive rounds on one track, the next round must zoom out to another open track.
@@ -74,26 +74,10 @@ Required floors:
 - Every closure check passes.
 - `closure.material_blockers` is empty.
 
-## Root Acceptance Guard
-
-When `codex exec` scoring says ready, the root agent still checks from the user's point of view:
-
-- Is the desired output explicit?
-- Are user-owned tradeoffs stated by the user, not inferred from code?
-- Would two executors make the same implementation choices?
-- Would verification prove user-visible behavior, not only repo mechanics?
-- Is any remaining question more than wording polish?
-
-If any answer is weak, use `co planner interview blocker add --reason "..."` or ask one focused follow-up.
-
 ## Draft Feedback Re-Entry
 
-If the user gives meaning-changing feedback after `draft.md` is shown, the interview is already closed. Do not call `co planner interview record` first.
+`co flow respond --stdin` classifies draft feedback:
 
-1. Run `co planner interview track open <track> --reason "draft feedback"`.
-2. Run `co planner interview ask --route user_decision|code_plus_decision --track <track> --question "<question>"`.
-3. If the user already supplied the answer in the feedback, immediately record that answer with the exact same question.
-4. Rerun `co planner interview score --mode auto`.
-5. Close the affected track and then close the interview again.
-6. Patch only the impacted `draft.md`, `plan.yaml`, and `tasks.yaml` sections.
-7. Rerun `co planner validate` and `co planner review run --stage pre-draft`.
+- `approve`: approve and finalize internally.
+- `wording_change`: revise authored bundle text, rerun validation and review, then return `present_draft`.
+- `meaning_change`: reopen the affected track, record the supplied user answer, rescore, reclose, regenerate/review the bundle, then return the next root boundary.

@@ -1,109 +1,78 @@
 ---
 name: coexec
-description: Executor-only skill that runs the active `.agents/plan/{plan-id}` YAML bundle through `co`.
+description: Executor-only skill that runs the active `.agents/plan/{plan-id}` bundle through `co flow`.
 ---
 
 # Coexec
 
-Run the active YAML plan-execute bundle selected by `.agents/plan/exec.yaml`.
+Run the active plan-execute bundle selected by `.agents/plan/exec.yaml`.
 
-You are the executor. You do not redesign the approved user contract. You execute locally and sequentially, using `~/.codex/skills/coplan/scripts/co` for every bundle read, write, state transition, note, and evidence operation. Do not read or edit bundle YAML files directly.
+You are the executor. You do not redesign the approved user contract or choose the next task. Use `~/.codex/skills/coplan/scripts/co flow ...` for bundle state, task selection, evidence, repair, halt, and finish gates. Do not read or edit bundle YAML files directly.
 
 ## Core Principles
 
-- `Status First`: start each loop with `co exec status`; it is the current execution context and drift guard.
-- `Follow Co Output`: treat `co` stdout YAML as the contract and follow `required_action`, `allowed_now`, and `forbidden_now`.
-- `Static Contract, Dynamic State`: `tasks.yaml` is the immutable execution contract; `status.yaml` is current progress; `notes.yaml` and `evidence.yaml` are CLI-managed runtime memory.
-- `Notes In The Loop`: use `notes` from `co exec status` and `co exec show-task` as persistent execution context; record material discoveries with `co note append`.
-- `Ready Before Doing`: only tasks returned by `co exec ready` may be claimed.
-- `One Doing Task`: if a task is `Doing`, finish, repair, add evidence, or halt that task before claiming another.
-- `In-Contract Failures Stay Doing`: ordinary failures keep the current task in `Doing` until repaired, evidenced, completed, or halted.
-- `Halt Is Exceptional`: use `co exec halt` only for a real `user_decision` or `external_environment` stop condition.
-- `User Contract Is Immutable`: do not change dependencies, task order, acceptance criteria, non-goals, or user-visible behavior during execution.
-- `Repair Envelope Only`: `co exec repair` may modify only contract-compatible envelope fields such as `files`, `implementation_notes`, or `verification`.
-- `Verify Ruthlessly`: do not mark a task done until required evidence is recorded and acceptance still fits the contract.
+- `Flow First`: start and resume with `co flow next`; use `co flow status` only for diagnostics.
+- `Root Action Contract`: every flow response includes `contract_version`, `mode`, `root_action`, `allowed_commands`, and `forbidden_actions`.
+- `One Current Task`: implement only the task in `root_action.task` when `root_action.type: execute_task`.
+- `Evidence Through Flow`: after running a verification command, pipe output to `co flow evidence`.
+- `Repair Through Flow`: if task metadata is stale but the user contract is unchanged, use `co flow repair`.
+- `Halt Through Flow`: halt only for a real `user_decision` or `external_environment` stop condition.
+- `No Direct State Changes`: never call removed `co exec ...`, mutate bundle YAML, claim tasks, complete tasks, or finish manually.
 
-## Execution Workflow
-
-Before the first `co` call, use the shared stdout contract in [../coplan/references/root-agent-co-guide.md](../coplan/references/root-agent-co-guide.md).
-
-### Step 1: Load Current Context
+## Execution Loop
 
 Run:
 
 ```bash
-~/.codex/skills/coplan/scripts/co exec status
+~/.codex/skills/coplan/scripts/co flow next
 ```
 
-Use its output as the source for:
+Then follow `root_action.type`:
 
-- active plan id and directory
-- current phase
-- current `Doing` task, if any
-- ready tasks
-- allowed and forbidden commands
-- required and recorded evidence
-- recent and current-task notes
-- current task files, verification steps, and acceptance criteria
+- `execute_task`: edit source files only within `root_action.task`, run the named verification, then record evidence.
+- `repair_task`: repair within the current task contract, rerun verification, then record evidence.
+- `report_halt`: stop and report `root_action.halt`.
+- `report_complete`: report final completion.
+- `continue_flow`: run `root_action.next_command`.
 
-Do not inspect bundle YAML files directly.
-
-### Step 2: Start Or Continue Execution
-
-- If phase is `ready_for_exec`, run `co exec start`.
-- If phase is `executing` and a task is already `Doing`, continue that task.
-- If phase is `executing` and no task is `Doing`, run `co exec ready` and claim exactly one ready task with `co exec claim <task-id>`.
-- If phase is `halted`, stop and report the halt reason from `co exec status`.
-- If phase is `complete`, report completion.
-
-### Step 3: Execute The Current Task
-
-- Use `co exec show-task <task-id>` or `co exec status` for the task contract.
-- Work only inside the declared task scope unless the change is contract-compatible envelope drift.
-- If file scope, implementation notes, or verification are stale but the user contract is unchanged, run `co exec repair <task-id> --field <path> --reason "..." --set|--add|--remove <yaml-value>`.
-- If the next change would alter user-visible behavior, acceptance criteria, dependencies, task order, or non-goals, run `co exec halt --kind user_decision --task <task-id> --reason "..."`.
-- If an external environment issue prevents progress after reasonable local repair, run `co exec halt --kind external_environment --task <task-id> --reason "..."`.
-
-### Step 4: Record Evidence
-
-After running a verification command, record its output through `co`:
+Record verification output with:
 
 ```bash
-<command> 2>&1 | ~/.codex/skills/coplan/scripts/co exec evidence add \
-  --task <task-id> \
+<command> 2>&1 | ~/.codex/skills/coplan/scripts/co flow evidence \
   --step <step-id> \
-  --name <artifact-name.txt> \
   --command "<command>" \
   --exit-code <code> \
   --success true|false \
   --stdin
 ```
 
-`co` writes the artifact under `evidence/`, appends the manifest record to `evidence.yaml`, and records a `risk` note when the evidence is unsuccessful.
+Repair only the allowed task envelope:
 
-### Step 5: Complete Or Continue Repair
+```bash
+~/.codex/skills/coplan/scripts/co flow repair \
+  --field <files|implementation_notes|verification path> \
+  --reason "<reason>" \
+  --set|--add|--remove <yaml-value>
+```
 
-- Run `co exec complete-task <task-id>` only after acceptance criteria are satisfied and required evidence has been recorded.
-- If completion fails because evidence is missing, keep the task in `Doing`, record or repair evidence, and retry.
-- If verification fails but the failure stays inside the current task contract, read the automatic risk note, keep the task in `Doing`, and continue fixing in the same turn.
-- After a task reaches `Done`, run `co exec status` again and continue to the next ready task.
+Halt with:
 
-### Step 6: Finish
-
-- `co exec finish` is allowed only when every task is `Done` and every `kind: final_verification` task is `Done`.
-- Do not declare completion before `co exec finish` succeeds.
+```bash
+~/.codex/skills/coplan/scripts/co flow halt \
+  --kind user_decision|external_environment \
+  --reason "<reason>"
+```
 
 ## Hard Gates
 
-- Do not read or write bundle YAML directly.
-- Do not stop on a fixable in-contract failure.
-- Do not claim a second task while one task is `Doing`.
-- Do not mark a task done without required evidence in `evidence.yaml`.
-- Do not finish before final verification tasks are done.
+- Do not claim or switch tasks yourself.
+- Do not complete a task yourself.
+- Do not finish execution yourself.
+- Do not mark evidence by writing loose files under `evidence/`.
+- Do not widen scope, dependencies, acceptance criteria, non-goals, or user-visible behavior during execution.
 
 ## Output Expectations
 
-- If `co exec finish` succeeds, the first line of the final report must be exactly `최종 완료 🎉`.
-- If execution stops early, the first line must name the open gate: current task, `halted` phase, or external environment issue.
-- Report the active plan id and path from `co current`.
-- Report task transitions, evidence records, repair or halt notes, and verification results.
+- If `root_action.type: report_complete`, the first line of the final report must be exactly `최종 완료 🎉`.
+- If execution stops early, name the current `root_action.type` or `root_action.halt`.
+- Report evidence records, repair or halt notes, and verification results.
