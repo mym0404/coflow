@@ -20,7 +20,7 @@ coflow contains Codex skills that coordinate a plan-then-execute workflow throug
 
 ## Routes
 
-- Runtime and architecture: `.agents/knowledge/runtime.md`.
+- Runtime, architecture, runtime graphs, and flow log analysis: `.agents/knowledge/runtime.md`.
 - Verification and blind spots: `.agents/knowledge/verification.md`.
 - Ouroboros reference overview: `.agents/knowledge/references/OUROBOROUS.md`.
 - Ouroboros plan reference: `.agents/knowledge/references/OUROBOROS-PLAN.md`.

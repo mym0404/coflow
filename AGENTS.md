@@ -13,7 +13,7 @@ It currently ships two skills:
 - Python CLI: `skills/coplan/scripts/co`.
 - Codex skill manifests and instructions: `skills/*/SKILL.md`.
 - YAML metadata: `skills/*/agents/openai.yaml`.
-- Markdown runtime and reference docs: `skills/*/README.md` and `skills/coplan/references/*.md`.
+- Markdown runtime and reference docs: `COPLAN.md`, `COEXEC.md`, `skills/*/README.md`, and `skills/coplan/references/*.md`.
 
 ## Runtime Start
 

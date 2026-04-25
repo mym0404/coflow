@@ -127,6 +127,8 @@ FLOW_FORBIDDEN_ACTIONS = [
     "edit CLI-owned bundle files directly",
     "choose the next workflow step without `co flow`",
 ]
+FLOW_LOG_FILE = "flow_log.ndjson"
+CURRENT_FLOW_COMMAND = None
 
 
 class ExError(Exception):
@@ -260,6 +262,149 @@ def dump_json(data):
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=False)
 
 
+def hash_text(value):
+    text = "" if value is None else str(value)
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def flow_log_path(plan_dir):
+    return plan_dir / FLOW_LOG_FILE
+
+
+def next_flow_log_seq(plan_dir):
+    path = flow_log_path(plan_dir)
+    if not path.exists():
+        return 1
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return sum(1 for _ in handle) + 1
+    except OSError:
+        return 1
+
+
+def active_plan_dir_or_none():
+    try:
+        data = load_yaml(EXEC_FILE)
+        plan_dir = data.get("plan_dir")
+        if not plan_dir:
+            return None
+        path = Path(str(plan_dir))
+        return path if path.exists() else None
+    except Exception:
+        return None
+
+
+def current_phase_or_none(plan_dir):
+    try:
+        status_path = plan_dir / "status.yaml"
+        if not status_path.exists():
+            return None
+        return load_yaml(status_path).get("phase")
+    except Exception:
+        return None
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [json_safe(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def append_flow_log(plan_dir, event, **fields):
+    if not plan_dir:
+        return
+    try:
+        plan_dir = Path(plan_dir)
+        plan_dir.mkdir(parents=True, exist_ok=True)
+        entry = {
+            "seq": next_flow_log_seq(plan_dir),
+            "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "event": event,
+            "plan_id": plan_dir.name,
+            "phase": current_phase_or_none(plan_dir),
+        }
+        entry.update({key: json_safe(value) for key, value in fields.items() if value is not None})
+        with flow_log_path(plan_dir).open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception:
+        return
+
+
+def summarize_codex_output(role, output):
+    if not isinstance(output, dict):
+        return {"type": type(output).__name__}
+    if role == "score":
+        return {
+            "project_mode": output.get("project_mode"),
+            "weakest_dimension": output.get("weakest_dimension"),
+        }
+    if role == "ask-next":
+        return {
+            "action": output.get("action"),
+            "route": output.get("route"),
+            "track": output.get("track"),
+        }
+    if role == "bundle_author":
+        tasks = output.get("tasks", {}).get("tasks", []) if isinstance(output.get("tasks"), dict) else []
+        return {
+            "draft_bytes": len(str(output.get("draft_markdown", "")).encode("utf-8")),
+            "plan_title": output.get("plan", {}).get("title") if isinstance(output.get("plan"), dict) else None,
+            "task_count": len(tasks) if isinstance(tasks, list) else None,
+        }
+    if role == "draft_feedback":
+        return {
+            "action": output.get("action"),
+            "track": output.get("track"),
+        }
+    if role in REQUIRED_REVIEWERS:
+        return {
+            "status": output.get("status"),
+            "issue_count": len(output.get("issues", [])) if isinstance(output.get("issues"), list) else None,
+        }
+    return {key: output.get(key) for key in ("status", "action", "summary") if key in output}
+
+
+def flow_command_name(args):
+    command = getattr(args, "command", None)
+    if command != "flow":
+        return None
+    flow_command = getattr(args, "flow_command", None)
+    return f"flow {flow_command}" if flow_command else "flow"
+
+
+def log_flow_command_start(plan_dir, command, **fields):
+    data = {
+        "command": command,
+        "phase_before": current_phase_or_none(plan_dir),
+    }
+    data.update(fields)
+    append_flow_log(
+        plan_dir,
+        "flow.command.start",
+        **data,
+    )
+
+
+def log_flow_command_error(message):
+    plan_dir = active_plan_dir_or_none()
+    append_flow_log(
+        plan_dir,
+        "flow.command.error",
+        command=CURRENT_FLOW_COMMAND,
+        ok=False,
+        error=str(message),
+        phase_after=current_phase_or_none(plan_dir) if plan_dir else None,
+    )
+
+
 def build_codex_child_env():
     env = os.environ.copy()
     for key in CODEX_AGENT_STRIP_ENV_KEYS:
@@ -325,7 +470,7 @@ def read_last_message_json(path):
     raise ExError("codex exec last message is not JSON")
 
 
-def run_codex_agent(role, prompt, schema, *, cwd=None):
+def run_codex_agent(role, prompt, schema, *, cwd=None, plan_dir=None):
     output_handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False)
     output_path = Path(output_handle.name)
     output_handle.close()
@@ -335,6 +480,15 @@ def run_codex_agent(role, prompt, schema, *, cwd=None):
         output_schema_path=schema_path,
         cwd=cwd,
     )
+    start = datetime.now(timezone.utc)
+    append_flow_log(
+        plan_dir,
+        "codex_agent.start",
+        role=role,
+        prompt_hash=hash_text(prompt),
+        prompt_bytes=len(prompt.encode("utf-8")),
+    )
+    logged_end = False
     try:
         process = subprocess.run(
             command,
@@ -350,10 +504,37 @@ def run_codex_agent(role, prompt, schema, *, cwd=None):
             stderr = process.stderr.strip()
             stdout = process.stdout.strip()
             detail = stderr or stdout or f"exit code {process.returncode}"
+            append_flow_log(
+                plan_dir,
+                "codex_agent.end",
+                role=role,
+                status="failed",
+                duration_ms=int((datetime.now(timezone.utc) - start).total_seconds() * 1000),
+                error_hash=hash_text(detail),
+            )
+            logged_end = True
             raise ExError(f"codex agent {role} failed: {detail}")
         output = read_last_message_json(output_path)
         if not isinstance(output, dict):
+            append_flow_log(
+                plan_dir,
+                "codex_agent.end",
+                role=role,
+                status="failed",
+                duration_ms=int((datetime.now(timezone.utc) - start).total_seconds() * 1000),
+                error_hash=hash_text("output must be a JSON object"),
+            )
+            logged_end = True
             raise ExError(f"codex agent {role} output must be a JSON object")
+        append_flow_log(
+            plan_dir,
+            "codex_agent.end",
+            role=role,
+            status="passed",
+            duration_ms=int((datetime.now(timezone.utc) - start).total_seconds() * 1000),
+            output_summary=summarize_codex_output(role, output),
+        )
+        logged_end = True
         return {
             "role": role,
             "model": CODEX_AGENT_DEFAULT_MODEL,
@@ -363,12 +544,23 @@ def run_codex_agent(role, prompt, schema, *, cwd=None):
             "output": output,
             "stdout_tail": process.stdout.strip().splitlines()[-20:],
         }
+    except Exception as exc:
+        if not logged_end:
+            append_flow_log(
+                plan_dir,
+                "codex_agent.end",
+                role=role,
+                status="failed",
+                duration_ms=int((datetime.now(timezone.utc) - start).total_seconds() * 1000),
+                error_hash=hash_text(str(exc)),
+            )
+        raise
     finally:
         output_path.unlink(missing_ok=True)
         schema_path.unlink(missing_ok=True)
 
 
-def run_codex_agents_parallel(agent_specs, *, cwd=None):
+def run_codex_agents_parallel(agent_specs, *, cwd=None, plan_dir=None):
     if not agent_specs:
         return {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(agent_specs)) as executor:
@@ -379,6 +571,7 @@ def run_codex_agents_parallel(agent_specs, *, cwd=None):
                 spec["prompt"],
                 spec["schema"],
                 cwd=cwd,
+                plan_dir=plan_dir,
             ): spec["role"]
             for spec in agent_specs
         }
@@ -1518,7 +1711,7 @@ def append_interview_agent_run(plan_dir, interview, role, status, output=None, e
 
 def run_interview_codex_agent(plan_dir, interview, role, prompt, schema):
     try:
-        result = run_codex_agent(role, prompt, schema, cwd=Path.cwd())
+        result = run_codex_agent(role, prompt, schema, cwd=Path.cwd(), plan_dir=plan_dir)
     except Exception as exc:
         append_interview_agent_run(plan_dir, interview, role, "failed", error=str(exc))
         raise
@@ -1663,6 +1856,15 @@ def create_pending_question(plan_dir, interview, route, track, question):
     interview["pending_user_question"] = pending
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
+    append_flow_log(
+        plan_dir,
+        "interview.question.created",
+        question_id=pending["id"],
+        route=route,
+        track=track,
+        question_hash=hash_text(question),
+        question_bytes=len(question.encode("utf-8")),
+    )
     return pending
 
 
@@ -2668,15 +2870,32 @@ def flow_result(data, root_action, *, mode=None, allowed_commands=None, forbidde
 
 
 def print_flow_result(data, root_action, *, mode=None, allowed_commands=None, forbidden_actions=None):
-    print_yaml(
-        flow_result(
-            data,
-            root_action,
-            mode=mode,
-            allowed_commands=allowed_commands,
-            forbidden_actions=forbidden_actions,
-        )
+    result = flow_result(
+        data,
+        root_action,
+        mode=mode,
+        allowed_commands=allowed_commands,
+        forbidden_actions=forbidden_actions,
     )
+    plan_dir = active_plan_dir_or_none()
+    append_flow_log(
+        plan_dir,
+        "root_action.emit",
+        command=CURRENT_FLOW_COMMAND,
+        mode=result.get("mode"),
+        root_action=root_action.get("type"),
+        allowed_command_count=len(result.get("allowed_commands", [])),
+    )
+    append_flow_log(
+        plan_dir,
+        "flow.command.end",
+        command=CURRENT_FLOW_COMMAND,
+        ok=result.get("ok"),
+        phase_after=current_phase_or_none(plan_dir) if plan_dir else None,
+        root_action=root_action.get("type"),
+        mode=result.get("mode"),
+    )
+    print_yaml(result)
 
 
 def print_flow_error(message):
@@ -2893,6 +3112,17 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
+    append_flow_log(
+        plan_dir,
+        "interview.answer.recorded",
+        round_id=round_id,
+        route=route,
+        track=track,
+        source=source,
+        question_hash=hash_text(question),
+        answer_hash=hash_text(answer),
+        answer_bytes=len(str(answer).encode("utf-8")),
+    )
     return round_item
 
 
@@ -2914,6 +3144,15 @@ def score_interview_internal(plan_dir, mode="auto"):
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
+    append_flow_log(
+        plan_dir,
+        "interview.score",
+        score_id=score["id"],
+        ready=score.get("ready"),
+        ambiguity=score.get("ambiguity"),
+        weakest_dimension=score.get("weakest_dimension"),
+        round_count=score.get("round_count"),
+    )
     return score
 
 
@@ -2945,6 +3184,13 @@ def close_interview_if_ready(plan_dir):
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
+    append_flow_log(
+        plan_dir,
+        "interview.closed",
+        round_count=len(interview.get("rounds", [])),
+        closed_tracks=list(INTERVIEW_REQUIRED_TRACKS),
+        summary_hash=hash_text(summary),
+    )
     return True
 
 
@@ -3136,6 +3382,15 @@ def write_authored_bundle(plan_dir, output):
     write_yaml(plan_dir / "tasks.yaml", tasks)
     sync_status_tasks(plan_dir, tasks)
     reset_review_status(plan_dir)
+    append_flow_log(
+        plan_dir,
+        "bundle.authored",
+        draft_hash=hash_text(draft),
+        draft_bytes=len(draft.encode("utf-8")),
+        plan_hash=hash_text(dump_json(plan)),
+        tasks_hash=hash_text(dump_json(tasks)),
+        task_count=len(tasks.get("tasks", [])) if isinstance(tasks.get("tasks"), list) else None,
+    )
 
 
 def validate_bundle_internal(plan_dir):
@@ -3159,6 +3414,7 @@ def run_review_internal(plan_dir):
             for reviewer in REQUIRED_REVIEWERS
         ],
         cwd=Path.cwd(),
+        plan_dir=plan_dir,
     )
     results = []
     passed_reviewers = []
@@ -3168,6 +3424,13 @@ def run_review_internal(plan_dir):
         if review_status == "PASS":
             passed_reviewers.append(reviewer)
         results.append({"reviewer": reviewer, **result})
+        append_flow_log(
+            plan_dir,
+            "review.result",
+            role=reviewer,
+            status=review_status,
+            issue_count=len(result.get("issues", [])) if isinstance(result.get("issues"), list) else None,
+        )
         append_note(
             plan_dir,
             "decision" if review_status == "PASS" else "risk",
@@ -3189,6 +3452,13 @@ def run_review_internal(plan_dir):
     }
     validate_status(status, tasks)
     write_yaml(plan_dir / "status.yaml", status)
+    append_flow_log(
+        plan_dir,
+        "review.join",
+        status=status["review"]["status"],
+        passed_reviewers=passed_reviewers,
+        required_reviewers=list(REQUIRED_REVIEWERS),
+    )
     return {"review": status["review"], "results": results}
 
 
@@ -3200,14 +3470,25 @@ def author_and_review_until_boundary(plan_dir, feedback=None):
             bundle_author_prompt(plan_dir, review_results=review_results, feedback=feedback),
             bundle_author_schema(),
             cwd=Path.cwd(),
+            plan_dir=plan_dir,
         )["output"]
         write_authored_bundle(plan_dir, output)
         review = run_review_internal(plan_dir)
         if review["review"]["status"] == "passed":
             status = load_yaml(plan_dir / "status.yaml")
+            previous_phase = status.get("phase")
             status["phase"] = "draft_review"
             validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
             write_yaml(plan_dir / "status.yaml", status)
+            append_flow_log(
+                plan_dir,
+                "state.transition",
+                file="status.yaml",
+                field="phase",
+                previous=previous_phase,
+                current="draft_review",
+                reason="review_passed",
+            )
             return {
                 "review": review["review"],
                 "author_summary": output.get("summary", ""),
@@ -3247,9 +3528,19 @@ def approve_and_finalize(plan_dir, comment):
     validate_draft_markdown(plan_dir)
     status = load_yaml(plan_dir / "status.yaml")
     require_review_passed(plan_dir, status, "draft approval")
+    previous_phase = status.get("phase")
     status["phase"] = "planning"
     validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
     write_yaml(plan_dir / "status.yaml", status)
+    append_flow_log(
+        plan_dir,
+        "state.transition",
+        file="status.yaml",
+        field="phase",
+        previous=previous_phase,
+        current="planning",
+        reason="draft_approved",
+    )
     append_note(
         plan_dir,
         "decision",
@@ -3266,8 +3557,18 @@ def approve_and_finalize(plan_dir, comment):
     validate_status(status, tasks)
     require_draft_approved(status)
     require_review_passed(plan_dir, status, "flow finalize")
+    previous_phase = status.get("phase")
     status["phase"] = "ready_for_exec"
     write_yaml(plan_dir / "status.yaml", status)
+    append_flow_log(
+        plan_dir,
+        "state.transition",
+        file="status.yaml",
+        field="phase",
+        previous=previous_phase,
+        current="ready_for_exec",
+        reason="finalize",
+    )
 
 
 def feedback_schema():
@@ -3302,11 +3603,20 @@ def classify_draft_feedback(plan_dir, feedback):
         "meaning_change means scope, output, verification, constraints, or stop conditions changed.\n\n"
         f"Draft:\n{read_text_file(plan_dir / 'draft.md')}\n\nFeedback:\n{feedback}"
     )
-    return run_codex_agent("draft_feedback", prompt, feedback_schema(), cwd=Path.cwd())["output"]
+    return run_codex_agent("draft_feedback", prompt, feedback_schema(), cwd=Path.cwd(), plan_dir=plan_dir)["output"]
 
 
 def apply_draft_feedback(plan_dir, feedback):
     classification = classify_draft_feedback(plan_dir, feedback)
+    append_flow_log(
+        plan_dir,
+        "draft_feedback.classified",
+        action=classification.get("action"),
+        track=classification.get("track"),
+        feedback_hash=hash_text(feedback),
+        feedback_bytes=len(feedback.encode("utf-8")),
+        summary_hash=hash_text(classification.get("summary")),
+    )
     action = classification["action"]
     if action == "approve":
         approve_and_finalize(plan_dir, classification.get("summary") or feedback)
@@ -3331,9 +3641,19 @@ def apply_draft_feedback(plan_dir, feedback):
     interview["required_tracks"][track]["status"] = "open"
     interview["required_tracks"][track]["summary"] = ""
     status = load_yaml(plan_dir / "status.yaml")
+    previous_phase = status.get("phase")
     status["phase"] = "drafting"
     validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
     write_yaml(plan_dir / "status.yaml", status)
+    append_flow_log(
+        plan_dir,
+        "state.transition",
+        file="status.yaml",
+        field="phase",
+        previous=previous_phase,
+        current="drafting",
+        reason="meaning_change_feedback",
+    )
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
     pending = create_pending_question(
@@ -3360,8 +3680,18 @@ def start_execution_internal(plan_dir):
     validate_status(status, tasks)
     if status["phase"] != "ready_for_exec":
         raise ExError("execution can start only from ready_for_exec")
+    previous_phase = status["phase"]
     status["phase"] = "executing"
     write_yaml(plan_dir / "status.yaml", status)
+    append_flow_log(
+        plan_dir,
+        "state.transition",
+        file="status.yaml",
+        field="phase",
+        previous=previous_phase,
+        current="executing",
+        reason="start_execution",
+    )
 
 
 def claim_task_internal(bundle, task_id):
@@ -3373,9 +3703,30 @@ def claim_task_internal(bundle, task_id):
     if task not in ready_tasks(bundle):
         raise ExError(f"task is not ready: {task_id}")
     status = bundle["status"]
+    previous_current = status.get("current_task")
+    previous_task_state = status["tasks"].get(task_id)
     status["current_task"] = task_id
     status["tasks"][task_id] = "Doing"
     write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    append_flow_log(
+        bundle["plan_dir"],
+        "state.transition",
+        file="status.yaml",
+        field="current_task",
+        previous=previous_current,
+        current=task_id,
+        reason="claim_task",
+    )
+    append_flow_log(
+        bundle["plan_dir"],
+        "state.transition",
+        file="status.yaml",
+        field=f"tasks.{task_id}",
+        previous=previous_task_state,
+        current="Doing",
+        reason="claim_task",
+    )
+    append_flow_log(bundle["plan_dir"], "task.claimed", task_id=task_id)
 
 
 def complete_task_internal(bundle, task_id):
@@ -3386,9 +3737,30 @@ def complete_task_internal(bundle, task_id):
     missing = required_evidence_missing(bundle, task)
     if missing:
         raise ExError("required evidence missing: " + ", ".join(missing))
+    previous_current = status.get("current_task")
+    previous_task_state = status["tasks"].get(task_id)
     status["tasks"][task_id] = "Done"
     status["current_task"] = None
     write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    append_flow_log(
+        bundle["plan_dir"],
+        "state.transition",
+        file="status.yaml",
+        field=f"tasks.{task_id}",
+        previous=previous_task_state,
+        current="Done",
+        reason="complete_task",
+    )
+    append_flow_log(
+        bundle["plan_dir"],
+        "state.transition",
+        file="status.yaml",
+        field="current_task",
+        previous=previous_current,
+        current=None,
+        reason="complete_task",
+    )
+    append_flow_log(bundle["plan_dir"], "task.completed", task_id=task_id)
 
 
 def finish_internal(bundle):
@@ -3399,9 +3771,20 @@ def finish_internal(bundle):
         finals = [task["id"] for task in final_tasks(bundle) if task_status(bundle).get(task["id"]) != "Done"]
         raise ExError(f"cannot finish; remaining={remaining}, final_verification_remaining={finals}")
     status = bundle["status"]
+    previous_phase = status.get("phase")
     status["phase"] = "complete"
     status["current_task"] = None
     write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    append_flow_log(
+        bundle["plan_dir"],
+        "state.transition",
+        file="status.yaml",
+        field="phase",
+        previous=previous_phase,
+        current="complete",
+        reason="finish_execution",
+    )
+    append_flow_log(bundle["plan_dir"], "execution.completed")
 
 
 def evidence_name_for_step(task, step_id):
@@ -3451,6 +3834,18 @@ def record_current_evidence(step_id, command, exit_code, success):
             [f"task:{current_id}", "evidence.yaml", str(artifact)],
             "co flow evidence",
         )
+    append_flow_log(
+        bundle["plan_dir"],
+        "evidence.recorded",
+        record_id=record["id"],
+        task_id=current_id,
+        step_id=step_id,
+        command_hash=hash_text(command),
+        command_bytes=len(str(command).encode("utf-8")),
+        exit_code=exit_code,
+        success=record["success"],
+        artifact=str(artifact),
+    )
     return record
 
 
@@ -3499,9 +3894,19 @@ def advance_planner_until_boundary(feedback=None):
         result = author_and_review_until_boundary(plan_dir, feedback=feedback)
         return result
     status = load_yaml(plan_dir / "status.yaml")
+    previous_phase = status.get("phase")
     status["phase"] = "draft_review"
     validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
     write_yaml(plan_dir / "status.yaml", status)
+    append_flow_log(
+        plan_dir,
+        "state.transition",
+        file="status.yaml",
+        field="phase",
+        previous=previous_phase,
+        current="draft_review",
+        reason="planner_ready_for_draft_review",
+    )
     return {"root_action": present_draft_action(plan_dir)}
 
 
@@ -3556,6 +3961,12 @@ def print_flow_boundary(result, extra=None):
 
 def flow_init(args):
     plan_dir = init_plan(args.plan_id, args.title, args.replace)
+    log_flow_command_start(
+        plan_dir,
+        CURRENT_FLOW_COMMAND or "flow init",
+        phase_before=None,
+        phase_after="drafting",
+    )
     print_flow_result(
         {"active_plan_id": args.plan_id, "plan_dir": str(plan_dir), "phase": "drafting"},
         continue_flow_action("Run `co flow next` to continue planning."),
@@ -3609,7 +4020,7 @@ def flow_respond(args):
 def flow_evidence(args):
     if not args.stdin:
         raise ExError("flow evidence requires --stdin")
-    record = record_current_evidence(args.step, args.command, args.exit_code, args.success)
+    record = record_current_evidence(args.step, args.evidence_command, args.exit_code, args.success)
     if not record["success"]:
         bundle = load_bundle()
         print_flow_boundary({"root_action": task_root_action(bundle, "repair_task")}, extra={"record": record})
@@ -3648,6 +4059,15 @@ def flow_repair(args):
         [f"task:{current_id}", f"tasks.yaml#{current_id}.{args.field}"],
         "co flow repair",
     )
+    operation = "set" if args.set_value is not None else "add" if args.add_value is not None else "remove"
+    append_flow_log(
+        bundle["plan_dir"],
+        "repair.applied",
+        task_id=current_id,
+        field=args.field,
+        operation=operation,
+        reason_hash=hash_text(args.reason),
+    )
     bundle = load_bundle()
     print_flow_boundary({"root_action": task_root_action(bundle, "execute_task")}, extra={"note": note})
 
@@ -3660,9 +4080,19 @@ def flow_halt(args):
     if current_id:
         find_task(bundle, current_id)
     status = bundle["status"]
+    previous_phase = status.get("phase")
     status["phase"] = "halted"
     status["halt"] = {"kind": args.kind, "task": current_id, "reason": args.reason}
     write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    append_flow_log(
+        bundle["plan_dir"],
+        "state.transition",
+        file="status.yaml",
+        field="phase",
+        previous=previous_phase,
+        current="halted",
+        reason="halt",
+    )
     note = append_note(
         bundle["plan_dir"],
         "halt",
@@ -3670,6 +4100,13 @@ def flow_halt(args):
         args.kind,
         [item for item in [f"task:{current_id}" if current_id else None, "status.yaml#halt"] if item],
         "co flow halt",
+    )
+    append_flow_log(
+        bundle["plan_dir"],
+        "halt.recorded",
+        kind=args.kind,
+        task_id=current_id,
+        reason_hash=hash_text(args.reason),
     )
     bundle = load_bundle()
     print_flow_boundary({"root_action": report_halt_action(bundle)}, extra={"note": note})
@@ -3726,7 +4163,7 @@ def build_parser():
 
     flow_evidence_parser = flow_sub.add_parser("evidence")
     flow_evidence_parser.add_argument("--step", required=True)
-    flow_evidence_parser.add_argument("--command", required=True)
+    flow_evidence_parser.add_argument("--command", dest="evidence_command", required=True)
     flow_evidence_parser.add_argument("--exit-code", type=int, required=True)
     flow_evidence_parser.add_argument("--success", choices=["true", "false"], required=True)
     flow_evidence_parser.add_argument("--stdin", action="store_true")
@@ -3749,16 +4186,21 @@ def build_parser():
 
 
 def main(argv=None):
+    global CURRENT_FLOW_COMMAND
     parser = build_parser()
     args = parser.parse_args(argv)
+    CURRENT_FLOW_COMMAND = flow_command_name(args)
     try:
         if getattr(args, "command", None) != "doctor":
             require_yaml()
+        if getattr(args, "command", None) == "flow" and getattr(args, "flow_command", None) != "init":
+            log_flow_command_start(active_plan_dir_or_none(), CURRENT_FLOW_COMMAND)
         args.func(args)
     except GateError as exc:
         data = {"ok": False, "error": str(exc)}
         data.update(exc.data)
         if getattr(args, "command", None) == "flow":
+            log_flow_command_error(str(exc))
             print_flow_result(
                 data,
                 continue_flow_action(exc.required_action),
@@ -3769,6 +4211,7 @@ def main(argv=None):
         return 1
     except ExError as exc:
         if getattr(args, "command", None) == "flow":
+            log_flow_command_error(str(exc))
             print_flow_error(str(exc))
             return 1
         sys.stdout.write("ok: false\n")

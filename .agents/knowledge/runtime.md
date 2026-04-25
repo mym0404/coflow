@@ -40,6 +40,46 @@ Keep planning and execution concepts synchronized whenever changing either side 
 - The planner side owns the approved user contract; the executor side owns sequential local execution, progress state, evidence, repair, halt, and finish.
 - If a behavior change blurs that boundary, update `skills/coplan/SKILL.md`, `skills/coexec/SKILL.md`, `skills/coplan/references/root-agent-co-guide.md`, `skills/coplan/references/bundle-schema.md`, `skills/coplan/references/gates-and-examples.md`, `skills/coexec/README.md`, and `skills/coplan/scripts/co` together.
 
+## Runtime Graphs
+
+Keep the root runtime graph docs synchronized with workflow behavior.
+
+- `COPLAN.md` describes planner-side `co flow` behavior.
+- `COEXEC.md` describes executor-side `co flow` behavior.
+- Each file must contain both Mermaid graph types: `sequenceDiagram` for actor and time order, and `flowchart` for branches, loops, and parallel or repeated work.
+- Mermaid flowcharts use a consistent role edge color palette: green for `[유저]`, blue for `[추론기계]`, gray for `[기계]`, and yellow for `[추론형식]`.
+- When changing planner or executor state transitions, root actions, interview loops, review loops, draft feedback handling, evidence handling, repair, halt, or finish behavior, update the relevant graph docs in the same change.
+- Planner parallel reviewer execution must stay visible in `COPLAN.md`; executor single-current-task execution must stay visible in `COEXEC.md`.
+
+## Flow Log
+
+Each active plan records an append-only runtime trace at `.agents/plan/{plan-id}/flow_log.ndjson`.
+The log is always on for `co flow` and is for development feedback, not user-facing contract state.
+`notes.yaml` remains the durable contract and decision note surface; `flow_log.ndjson` records runtime behavior for later analysis.
+
+The log uses JSON Lines.
+Every event includes `seq`, `ts`, `event`, `plan_id`, and `phase` when an active plan exists.
+Common optional fields include `command`, `ok`, `phase_before`, `phase_after`, `root_action`, `task_id`, `track`, `route`, `role`, `status`, `duration_ms`, `input_hash`, `stdin_bytes`, and `output_summary`.
+Raw user answers, raw prompts, and full draft bodies are not stored; the CLI records hashes, byte lengths, and bounded summaries.
+
+High-value event families:
+
+- `flow.command.*` shows public `co flow` command boundaries and errors.
+- `root_action.emit` shows exactly where control returns to the root agent.
+- `interview.*` shows pending question creation, answer recording, ambiguity scoring, and interview closure.
+- `codex_agent.*` shows private Codex CLI subagent execution behind the CLI.
+- `bundle.authored`, `review.result`, and `review.join` show bundle generation and parallel review behavior.
+- `draft_feedback.classified` shows draft feedback routing.
+- `state.transition`, `task.claimed`, `task.completed`, `evidence.recorded`, `repair.applied`, `halt.recorded`, and `execution.completed` show executor orchestration.
+
+Use the flow log to check responsibility boundaries:
+
+- Root stays thin when each `root_action.emit` is followed by an allowed `flow.command.*` boundary instead of direct bundle edits.
+- Interview behaves like an iterator when one `flow respond` is followed by CLI-owned scoring, closure, question creation, authoring, or draft presentation events.
+- Codex CLI agents remain internal details when `codex_agent.*` appears between CLI events rather than as root-facing commands.
+- Executor task selection stays in the CLI when `task.claimed` and `task.completed` are emitted by flow events.
+- Verification failure reaches the right boundary when failed `evidence.recorded` is followed by `root_action.emit` with `repair_task`.
+
 ## Planner Path
 
 Use `skills/coplan/SKILL.md` as the planner entrypoint.
