@@ -172,7 +172,8 @@ def require_yaml():
 def bootstrap_pyyaml(original_exc):
     if os.environ.get("EX_BOOTSTRAPPED") == "1":
         raise ExError(
-            f"PyYAML is required but bootstrap failed. Run `{CLI_COMMAND_NAME} doctor` for details."
+            "PyYAML is required but bootstrap failed after re-exec. "
+            f"Bootstrap python: {BOOTSTRAP_PYTHON}"
         ) from original_exc
     try:
         BOOTSTRAP_DIR.mkdir(parents=True, exist_ok=True)
@@ -193,7 +194,7 @@ def bootstrap_pyyaml(original_exc):
         )
     except Exception as exc:
         raise ExError(
-            f"PyYAML bootstrap failed. Run `{CLI_COMMAND_NAME} doctor` for details. "
+            f"PyYAML bootstrap failed. Bootstrap venv: {BOOTSTRAP_VENV}. "
             f"Original import error: {original_exc}"
         ) from exc
     reexec_with_bootstrap_python()
@@ -256,19 +257,6 @@ def result_with_required_action(data, required_action, next_command=None):
     if next_command:
         result["next_command"] = next_command
     return result
-
-
-def print_simple_yaml(data):
-    for key, value in data.items():
-        if value is True:
-            rendered = "true"
-        elif value is False:
-            rendered = "false"
-        elif value is None:
-            rendered = "null"
-        else:
-            rendered = repr(str(value))
-        sys.stdout.write(f"{key}: {rendered}\n")
 
 
 def dump_json(data):
@@ -1800,35 +1788,6 @@ def command_review_context(_args):
     except Exception as exc:
         data["git_error"] = str(exc)
     print_yaml(data)
-
-
-def command_doctor(_args):
-    current_yaml = False
-    current_error = None
-    try:
-        import yaml  # type: ignore
-
-        current_yaml = True
-        current_version = yaml.__version__
-    except Exception as exc:
-        current_version = None
-        current_error = str(exc)
-    venv_yaml = python_can_import_yaml(BOOTSTRAP_PYTHON)
-    data = {
-        "ok": True,
-        "active_python": sys.executable,
-        "script": str(Path(__file__)),
-        "bootstrap_dir": str(BOOTSTRAP_DIR),
-        "bootstrap_venv": str(BOOTSTRAP_VENV),
-        "bootstrap_python": str(BOOTSTRAP_PYTHON),
-        "current_python_yaml": current_yaml,
-        "current_python_yaml_version": current_version,
-        "current_python_yaml_error": current_error,
-        "bootstrap_python_exists": BOOTSTRAP_PYTHON.exists(),
-        "bootstrap_python_yaml": venv_yaml,
-        "required_action": f"If current_python_yaml or bootstrap_python_yaml is true, continue the requested {CLI_COMMAND_NAME} flow; otherwise resolve the reported Python or PyYAML environment issue.",
-    }
-    print_simple_yaml(data)
 
 
 def run_git(args):
@@ -3860,9 +3819,6 @@ def build_parser():
     review_context = sub.add_parser("review-context")
     review_context.set_defaults(func=command_review_context)
 
-    doctor = sub.add_parser("doctor")
-    doctor.set_defaults(func=command_doctor)
-
     flow = sub.add_parser("flow")
     flow_sub = flow.add_subparsers(dest="flow_command", required=True)
 
@@ -3915,8 +3871,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     CURRENT_FLOW_COMMAND = flow_command_name(args)
     try:
-        if getattr(args, "command", None) != "doctor":
-            require_yaml()
+        require_yaml()
         if getattr(args, "command", None) == "flow" and getattr(args, "flow_command", None) != "init":
             log_flow_command_start(active_plan_dir_or_none(), CURRENT_FLOW_COMMAND)
         args.func(args)

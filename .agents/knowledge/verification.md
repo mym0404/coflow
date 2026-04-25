@@ -7,7 +7,6 @@ This repository has no project-level `package.json`, `pyproject.toml`, `Makefile
 Use the smallest command that matches the changed surface:
 
 - CLI syntax: `python3 -m py_compile skills/coplan/scripts/co.py`.
-- CLI environment: `skills/coplan/scripts/co.py doctor`.
 - CLI command shape: `skills/coplan/scripts/co.py --help` and `skills/coplan/scripts/co.py flow --help`.
 - Flow log smoke: `co.py flow init --stdin`, `co.py flow next`, and `co.py flow respond --stdin` should append core events to `.agents/plan/{plan-id}/flow_log.ndjson`.
 - Knowledge routing: verify that every `.agents/knowledge/*.md` route named by `AGENTS.md` exists.
@@ -22,7 +21,6 @@ Use the smallest command that matches the changed surface:
 
 ## Coverage Notes
 
-- `co.py doctor` checks Python and PyYAML availability; it does not validate planner or executor behavior.
 - `py_compile` catches Python syntax errors only.
 - Help commands verify argparse registration only.
 - Planner review, interview scoring, bundle authoring, feedback classification, and ask-next paths require the `codex` CLI and can launch subprocess subagents.

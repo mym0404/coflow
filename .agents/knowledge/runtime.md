@@ -56,6 +56,8 @@ Keep user-facing graphs and root-agent skill prompts synchronized with runtime b
 - `skills/*/references/` is not used.
 - Project maintenance references must live under `.agents/knowledge/`, not under `skills/*/references/`.
 - Skill prompts should use concise tables, root action contracts, and execution loops instead of Mermaid diagrams.
+- Each root-agent skill prompt must carry current `co.py flow` YAML stdout examples, common YAML field meanings, and per-`root_action.type` handling instructions for the actions that skill can receive.
+- When `co.py flow` stdout schema, `root_action` payload, action names, or phase/mode behavior changes, update `skills/coplan/SKILL.md` and `skills/coexec/SKILL.md` in the same change as needed so their YAML examples do not drift from `skills/coplan/scripts/co.py`.
 - When changing planner or executor state transitions, root actions, user boundaries, evidence handling, repair, halt, or finish behavior, update the relevant user-facing graph doc and the relevant `SKILL.md` in the same change.
 - User-facing graph docs can show CLI and subagent detail; `SKILL.md` should keep only the workflow knowledge the root agent needs to run the skill.
 
@@ -98,7 +100,7 @@ Core flow:
 - continue with `skills/coplan/scripts/co.py flow next`.
 - ask exact `root_action.question` values and pipe answers to `co.py flow respond --stdin`.
 - present exact `root_action.plan_seed` values and pipe approval or feedback to `co.py flow respond --stdin`.
-- switch to `coexec` when `root_action.type` becomes `execute_task` or `repair_task`; report and stop on `report_halt`, `report_complete`, or `report_error`.
+- run `coexec` when `root_action.type` becomes `execute_task` or `repair_task`; report and stop on `report_halt`, `report_complete`, or `report_error`.
 
 The root agent does not directly edit bundle files.
 CLI-owned files include `plan_seed.yaml`, `tasks.yaml`, `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml`.

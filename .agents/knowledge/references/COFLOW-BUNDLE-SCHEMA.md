@@ -39,7 +39,6 @@ Read-only and diagnostics:
 ```bash
 co.py current
 co.py show --file tasks|plan-seed|interview|status|notes|evidence
-co.py doctor
 co.py review-context
 ```
 
