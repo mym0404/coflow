@@ -16,7 +16,7 @@ description: 사용자 요청을 `co.py flow`로 실행 가능한 plan bundle로
 - `co.py flow status`는 read-only 진단 YAML이며 root action source가 아니다.
 - `mode: planner`이면 Root agent는 반환된 `root_action` 하나만 수행한다.
 - `mode`가 `error`이면 에러를 보고하고 멈춘다.
-- 사용자에게 물어야 할 내용은 `root_action.question` 그대로 묻는다.
+- 사용자에게 물어야 할 내용은 `root_action.question`을 기준으로 `request_user_input`에 맞게 짧게 정리해 묻는다.
 - 사용자에게 보여줄 계획 계약은 `root_action.plan_seed` 그대로 보여준다.
 - 사용자 요청, 답변, approval, feedback은 요약·번역·정리하지 않는다.
 - 사용자 답변, approval, feedback은 `co.py flow respond --stdin`으로 전달한다.
@@ -118,8 +118,18 @@ root_action:
 CLI가 다음 계획 결정을 위해 사용자 판단이 필요하다고 판정한 상태다.
 
 해야 할 일:
-`root_action.question`만 사용자에게 그대로 묻는다.
-질문에 설명, 예시, 선택지, 요약, 번역을 덧붙이지 않는다.
+`root_action.question`을 의미 기준으로 삼고 `request_user_input` tool로 사용자에게 묻는다.
+`request_user_input`이 현재 Codex surface나 mode에서 사용할 수 없으면 같은 내용을 일반 텍스트 질문으로 묻는다.
+질문 의미, 판단 범위, 답변 의미를 새로 만들지 않는다.
+Codex UI에 맞추기 위해 아래 가공만 허용한다.
+
+- `header`: 질문 앞의 짧은 prefix가 있으면 사용하고, 없으면 `Plan`처럼 12자 이하로 둔다.
+- `question`: 줄바꿈과 중복 공백을 정리하고, CLI 질문의 판단 대상을 보존한다.
+- `options`: CLI 질문 안에 실제 선택지가 있으면 2-3개로 옮긴다. 실제 선택지가 없으면 답변 의미를 대신 만들지 말고, 자유 입력을 유도하는 중립 option을 둔다.
+- `description`: option의 영향만 짧게 적고, 새로운 요구사항이나 예시 답변을 넣지 않는다.
+
+사용자가 자유 입력을 제공하면 그 텍스트를 최종 답변으로 사용한다.
+사용자가 option만 선택하면 선택된 option label과 description을 답변으로 사용한다.
 사용자 답변은 요약·번역·정리하지 않고 `co.py flow respond --stdin`으로 전달한다.
 
 ### `present_plan_seed`
@@ -213,7 +223,7 @@ root_action 처리
 반복
 ```
 
-인터뷰가 충분해 보여도 `co.py flow`가 closure audit 질문을 `ask_user`로 반환할 수 있다. 이 경우에도 다른 질문과 동일하게 그대로 묻고 답변을
+인터뷰가 충분해 보여도 `co.py flow`가 closure audit 질문을 `ask_user`로 반환할 수 있다. 이 경우에도 다른 질문과 동일하게 `request_user_input`으로 묻고 답변을
 전달한다.
 
 ## 명령 제한
