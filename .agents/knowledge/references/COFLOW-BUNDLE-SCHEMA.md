@@ -51,6 +51,11 @@ co.py review-context
 `request.yaml` stores the initial user request captured by `co.py flow init`.
 The same prompt is also stored in `interview.yaml.initial_context` for agent context.
 
+Required fields:
+
+- `title`
+- `prompt`
+
 ## `plan_seed.yaml`
 
 `plan_seed.yaml` is the internal authoring contract generated after closure audit passes.
@@ -165,6 +170,26 @@ Valid routes:
 - `user_decision`: `from-user...`
 - `code_plus_decision`: `from-user...`
 - `research_confirmation`: `from-research...`
+
+`closure_audit` uses the current Seed Closer audit state.
+
+Required `closure_audit` fields:
+
+- `status`
+- `summary`
+- `material_blockers`
+- `question`
+- `round_count`
+- `score_id`
+
+Required `closure.checks` fields:
+
+- `desired_output_explicit`
+- `user_tradeoffs_explicit`
+- `closure_audit_passed`
+- `executor_determinism`
+- `verification_proves_behavior`
+- `no_material_questions`
 
 `co.py flow` closes the interview only when:
 

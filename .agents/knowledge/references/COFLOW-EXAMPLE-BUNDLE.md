@@ -59,9 +59,8 @@ Add a lightweight unauthenticated readiness endpoint.
 ## `request.yaml`
 
 ```yaml
+title: Add health endpoint
 prompt: Add a lightweight unauthenticated readiness endpoint.
-captured_at: "2026-04-25T00:00:00Z"
-source: flow.init
 ```
 
 ## `plan_seed.yaml`
@@ -72,10 +71,12 @@ generated_at: "2026-04-25T00:00:00Z"
 round_count: 5
 ambiguity_score_id: S2
 closure_audit:
-  id: A1
   status: passed
-  score_id: S2
+  summary: All execution-changing decisions are closed.
+  material_blockers: []
+  question: ""
   round_count: 5
+  score_id: S2
 seed:
   title: Add health endpoint
   goal: Ship a deployment-readiness endpoint with focused and final verification.
@@ -299,13 +300,12 @@ ambiguity:
     reasoning_effort: medium
   history: []
 closure_audit:
-  id: A1
   status: passed
-  score_id: S2
-  round_count: 5
-  question: null
-  blockers: []
   summary: All execution-changing decisions are closed.
+  material_blockers: []
+  question: ""
+  round_count: 5
+  score_id: S2
 closure:
   ready: true
   summary: All execution-changing decisions are closed.
@@ -317,7 +317,7 @@ closure:
     user_tradeoffs_explicit:
       passed: true
       summary: Scope, non-goals, and response constraints came from user judgment.
-    hidden_assumptions_reviewed:
+    closure_audit_passed:
       passed: true
       summary: Broader verification scope was clarified before drafting.
     executor_determinism:
