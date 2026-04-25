@@ -266,10 +266,6 @@ def result_with_required_action(data, required_action, next_command=None):
     return result
 
 
-def print_result(data, required_action, next_command=None):
-    print_yaml(result_with_required_action(data, required_action, next_command))
-
-
 def print_simple_yaml(data):
     for key, value in data.items():
         if value is True:
@@ -648,17 +644,6 @@ def run_codex_agents_parallel(agent_specs, *, cwd=None, plan_dir=None):
         }
 
 
-def parse_yaml_text(text, label):
-    yaml = require_yaml()
-    try:
-        data = yaml.safe_load(text)
-    except Exception as exc:
-        raise ExError(f"{label} is not valid YAML: {exc}") from exc
-    if not isinstance(data, dict):
-        raise ExError(f"{label} must be a YAML mapping")
-    return data
-
-
 def parse_yaml_value(text):
     yaml = require_yaml()
     try:
@@ -702,16 +687,6 @@ def file_path(plan_dir, name):
     if name not in mapping:
         raise ExError(f"unknown file: {name}")
     return plan_dir / mapping[name]
-
-
-def load_active_file(name):
-    _, plan_dir = active_plan()
-    return load_yaml(file_path(plan_dir, name))
-
-
-def write_active_file(name, data):
-    _, plan_dir = active_plan()
-    write_yaml(file_path(plan_dir, name), data)
 
 
 def read_text_file(path):
@@ -1097,24 +1072,6 @@ def interview_round_tracks(interview):
     return tracks, user_tracks
 
 
-def interview_hidden_assumptions_reviewed(interview):
-    return any(
-        item.get("purpose") == INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE
-        for item in interview.get("rounds", [])
-    )
-
-
-def interview_hidden_assumption_required(interview, latest=None):
-    if interview_hidden_assumptions_reviewed(interview):
-        return False
-    score = latest if isinstance(latest, dict) else interview.get("ambiguity", {}).get("latest")
-    if not isinstance(score, dict):
-        return False
-    if score.get("round_count") != len(interview.get("rounds", [])):
-        return False
-    return score.get("ready") is True
-
-
 def hidden_assumption_followup(latest):
     followup = latest.get("recommended_followup") if isinstance(latest, dict) else None
     if isinstance(followup, dict):
@@ -1488,49 +1445,6 @@ def build_planning_context(plan_id, plan_dir, title, interview):
     }
 
 
-def planning_context_gate_failures(interview):
-    failures = []
-    if interview.get("status") != "closed":
-        failures.append("interview_not_closed")
-    if interview.get("pending_user_question") is not None:
-        failures.append("pending_user_question")
-    material_blockers = interview.get("closure", {}).get("material_blockers", [])
-    if material_blockers:
-        failures.append("material_blockers=" + ",".join(str(item) for item in material_blockers))
-    coverage = planning_context_coverage(interview)
-    failures.extend(interview_ambiguity_blockers(interview))
-    if interview.get("closure_audit", {}).get("status") != "passed":
-        failures.append("closure_audit_not_passed")
-    missing_checks = [
-        check
-        for check, state in interview.get("closure", {}).get("checks", {}).items()
-        if state.get("passed") is not True
-    ]
-    if missing_checks:
-        failures.append("missing_closure_checks=" + ",".join(missing_checks))
-    return failures
-
-
-def planning_context_required_action(failures, interview):
-    if "pending_user_question" in failures:
-        return f"Ask the pending user question exactly, then record the answer with `{CLI_COMMAND_NAME} flow respond --stdin`."
-    if any(item in failures for item in ["missing_ambiguity_score", "ambiguity_score_stale", "ambiguity_score_missing"]):
-        return f"Run `{CLI_COMMAND_NAME} flow next` so the CLI can score or ask the next question."
-    if any(item.startswith("ambiguity>") or item == "ambiguity_ready=false" or item.startswith("clarity_floors_failed=") for item in failures):
-        latest = interview.get("ambiguity", {}).get("latest") or {}
-        followup = latest.get("recommended_followup")
-        if followup:
-            return f"Ask or record the recommended follow-up: {followup}"
-        return f"Run `{CLI_COMMAND_NAME} flow next` to collect the missing clarification."
-    if "closure_audit_not_passed" in failures:
-        return "Run the closure audit through `co.py flow next`; ask exactly one returned follow-up if needed."
-    if any(item.startswith("missing_closure_checks=") for item in failures):
-        return "Rerun `co.py flow next` so the CLI can complete closure checks after audit."
-    if "interview_not_closed" in failures:
-        return "Continue `co.py flow next` until the CLI closes the interview or returns a user question."
-    return "Resolve the planning context gate failures, then rerun `co.py flow next`."
-
-
 def default_review_state():
     return {
         "status": "not_run",
@@ -1787,9 +1701,11 @@ def required_evidence_missing(bundle, task):
 
 def command_current(_args):
     plan_id, plan_dir = active_plan()
-    print_result(
-        {"active_plan_id": plan_id, "plan_dir": str(plan_dir)},
-        "Use active_plan_id and plan_dir as the current bundle pointer, then continue the relevant planner or executor flow.",
+    print_yaml(
+        result_with_required_action(
+            {"active_plan_id": plan_id, "plan_dir": str(plan_dir)},
+            "Use active_plan_id and plan_dir as the current bundle pointer, then continue the relevant planner or executor flow.",
+        )
     )
 
 
@@ -2254,58 +2170,6 @@ def normalize_ambiguity_score(output, interview, requested_mode):
     }
 
 
-def note_append(args):
-    _, plan_dir = active_plan()
-    affects = args.affects or []
-    entry = append_note(plan_dir, args.kind, args.text, args.why, affects, args.source)
-    print_result({"entry": entry}, "Continue the current planner or executor flow.")
-
-
-def note_list(args):
-    notes = load_active_file("notes")
-    entries = filter_notes(notes_entries(notes), kind=args.kind, task_id=args.task)
-    entries = limit_notes(entries, args.limit)
-    print_result({"entries": entries}, "Use the listed notes as context, then continue the current flow.")
-
-
-def exec_start(_args):
-    _, plan_dir = active_plan()
-    status = load_yaml(plan_dir / "status.yaml")
-    tasks = load_yaml(plan_dir / "tasks.yaml")
-    validate_status(status, tasks)
-    if status["phase"] != "ready_for_exec":
-        raise ExError("execution can start only from ready_for_exec")
-    status["phase"] = "executing"
-    write_yaml(plan_dir / "status.yaml", status)
-    print_result(
-        {"phase": "executing"},
-        "Run `co exec status` and follow allowed_now.",
-        "co exec status",
-    )
-
-
-def exec_ready(_args):
-    bundle = load_bundle()
-    ready_ids = [task["id"] for task in ready_tasks(bundle)]
-    if ready_ids:
-        required_action = "Claim exactly one task from ready_now with `co exec claim <task-id>`."
-    else:
-        required_action = "Run `co exec status`; if can_finish is true, run `co exec finish`, otherwise continue the current task or halt."
-    print_result({"ready_now": ready_ids}, required_action)
-
-
-def exec_show_task(args):
-    bundle = load_bundle()
-    task = find_task(bundle, args.task_id)
-    statuses = task_status(bundle)
-    records = recorded_evidence_for_task(bundle, args.task_id)
-    entries = filter_notes(notes_entries(bundle["notes"]), task_id=args.task_id)
-    print_result(
-        {"task": task, "status": statuses.get(args.task_id), "evidence": records, "notes": entries},
-        "Execute the task within its contract, run verification, then record evidence with `co exec evidence add`.",
-    )
-
-
 def current_task_status(bundle, current_id):
     task = find_task(bundle, current_id)
     return {
@@ -2331,163 +2195,12 @@ def current_task_status(bundle, current_id):
     }
 
 
-def current_task_allowed_commands(current_id):
-    return [
-        f'co exec evidence add --task {current_id} --step <step-id> --name <file> --command "..." --exit-code <code> --success true|false --stdin',
-        f'co note append risk --text "..." --why "..." --affects task:{current_id} --source "coexec"',
-        f'co exec repair {current_id} --field <path> --reason "..."',
-        f"co exec complete-task {current_id}",
-        f'co exec halt --kind user_decision|external_environment --task {current_id} --reason "..."',
-    ]
-
-
-def current_task_forbidden_actions(current_id):
-    return [
-        f"claim another task while {current_id} is Doing",
-        "finish before final verification is Done",
-        "mark Done without required evidence",
-    ]
-
-
-def idle_allowed_commands(bundle, ready):
-    allowed = [f"co exec claim {task['id']}" for task in ready]
-    if can_finish(bundle):
-        allowed.append("co exec finish")
-    return allowed
-
-
-def idle_forbidden_actions():
-    return [
-        "claim a task that is not ready",
-        "finish before all tasks and final verification are Done",
-    ]
-
-
-def exec_status_next_action(bundle, current_id, ready):
-    phase = bundle["status"].get("phase")
-    if phase == "ready_for_exec":
-        return "Run `co exec start`.", "co exec start"
-    if phase == "executing" and current_id:
-        return "Continue current_task; record evidence, repair, complete, or halt using allowed_now.", None
-    if phase == "executing" and ready:
-        return "Claim exactly one task from progress.ready_now.", f"co exec claim {ready[0]['id']}"
-    if phase == "executing" and can_finish(bundle):
-        return "Run `co exec finish`.", "co exec finish"
-    if phase == "halted":
-        return "Stop execution and report halt.kind and halt.reason to the user.", None
-    if phase == "complete":
-        return "Report final completion.", None
-    return "Follow allowed_now and forbidden_now; do not mutate bundle YAML directly.", None
-
-
-def exec_status(_args):
-    bundle = load_bundle()
-    groups = status_groups(bundle)
-    ready = ready_tasks(bundle)
-    current_id = bundle["status"].get("current_task")
-    current = None
-    current_view = None
-    evidence_state = None
-    if current_id:
-        current_state = current_task_status(bundle, current_id)
-        current = current_state["summary"]
-        current_view = current_state["view"]
-        evidence_state = current_state["evidence_state"]
-        allowed = current_task_allowed_commands(current_id)
-        forbidden = current_task_forbidden_actions(current_id)
-    else:
-        allowed = idle_allowed_commands(bundle, ready)
-        forbidden = idle_forbidden_actions()
-    data = {
-        "active_plan": {"id": bundle["plan_id"], "dir": str(bundle["plan_dir"])},
-        "phase": bundle["status"].get("phase"),
-        "can_finish": can_finish(bundle),
-        "current_task": current,
-        "progress": {**groups, "ready_now": [task["id"] for task in ready]},
-        "allowed_now": allowed,
-        "forbidden_now": forbidden,
-        "current_task_view": current_view,
-        "evidence_state": evidence_state,
-        "notes": exec_notes_view(bundle, current_id),
-        "halt": bundle["status"].get("halt"),
-        "drift_guard": {
-            "message": "Do not switch tasks or widen scope. Complete or repair the current task unless halt is required."
-        },
-    }
-    required_action, next_command = exec_status_next_action(bundle, current_id, ready)
-    print_result(data, required_action, next_command)
-
-
-def exec_claim(args):
-    bundle = load_bundle()
-    if bundle["status"].get("phase") != "executing":
-        raise ExError("tasks can be claimed only while phase is executing")
-    if bundle["status"].get("current_task"):
-        raise ExError(f"current task is already Doing: {bundle['status']['current_task']}")
-    task = find_task(bundle, args.task_id)
-    if task not in ready_tasks(bundle):
-        raise ExError(f"task is not ready: {args.task_id}")
-    status = bundle["status"]
-    status["current_task"] = args.task_id
-    status["tasks"][args.task_id] = "Doing"
-    write_yaml(bundle["plan_dir"] / "status.yaml", status)
-    print_result(
-        {"task": args.task_id, "status": "Doing"},
-        "Execute the claimed task, run verification, and record evidence with `co exec evidence add`.",
-    )
-
-
 def safe_evidence_name(name):
     if os.path.isabs(name):
         raise ExError("--name must be relative to evidence/")
     if ".." in Path(name).parts:
         raise ExError("--name must not contain ..")
     return name
-
-
-def exec_evidence_add(args):
-    bundle = load_bundle()
-    task = find_task(bundle, args.task)
-    task_step(task, args.step)
-    if task_status(bundle).get(args.task) != "Doing":
-        raise ExError("evidence can be added only for a Doing task")
-    name = safe_evidence_name(args.name)
-    artifact = Path("evidence") / name
-    artifact_path = bundle["plan_dir"] / artifact
-    artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(read_stdin(), encoding="utf-8")
-
-    evidence = bundle["evidence"]
-    records = evidence.setdefault("records", [])
-    record = {
-        "id": next_id(records, "V"),
-        "task_id": args.task,
-        "step_id": args.step,
-        "command": args.command,
-        "exit_code": args.exit_code,
-        "success": normalize_bool(args.success),
-        "artifact": str(artifact),
-        "satisfies": args.satisfies or [],
-    }
-    records.append(record)
-    write_yaml(bundle["plan_dir"] / "evidence.yaml", evidence)
-    data = {"record": record}
-    if record["success"]:
-        required_action = "If acceptance criteria are satisfied and all required evidence is recorded, run `co exec complete-task <task-id>`; otherwise continue the task."
-        next_command = f"co exec complete-task {args.task}"
-    else:
-        note = append_note(
-            bundle["plan_dir"],
-            "risk",
-            f"Verification failed for {args.task}/{args.step}.",
-            f"Command exited {args.exit_code}: {args.command}",
-            [f"task:{args.task}", "evidence.yaml", str(artifact)],
-            f"co exec evidence add --task {args.task} --step {args.step}",
-        )
-        data["note"] = note
-        required_action = "Keep the task Doing; repair or fix within contract, rerun verification, and record new evidence."
-        next_command = None
-    print_result(data, required_action, next_command)
 
 
 def set_nested(data, path, value=None, add=False, remove=False):
@@ -2512,98 +2225,6 @@ def set_nested(data, path, value=None, add=False, remove=False):
         target[leaf] = [item for item in existing if item != value]
     else:
         target[leaf] = value
-
-
-def exec_repair(args):
-    bundle = load_bundle()
-    task = find_task(bundle, args.task_id)
-    if task_status(bundle).get(args.task_id) != "Doing":
-        raise ExError("repair is allowed only for a Doing task")
-    if args.set_value is None and args.add_value is None and args.remove_value is None:
-        raise ExError("repair requires one of --set, --add, or --remove")
-    tasks_data = bundle["tasks"]
-    task = find_task(bundle, args.task_id)
-    if args.set_value is not None:
-        set_nested(task, args.field, parse_yaml_value(args.set_value))
-    elif args.add_value is not None:
-        set_nested(task, args.field, parse_yaml_value(args.add_value), add=True)
-    else:
-        set_nested(task, args.field, parse_yaml_value(args.remove_value), remove=True)
-    validate_tasks(tasks_data)
-    write_yaml(bundle["plan_dir"] / "tasks.yaml", tasks_data)
-    note = append_note(
-        bundle["plan_dir"],
-        "repair",
-        f"Repaired {args.task_id} field {args.field}.",
-        args.reason,
-        [f"task:{args.task_id}", f"tasks.yaml#{args.task_id}.{args.field}"],
-        f"co exec repair {args.task_id}",
-    )
-    print_result(
-        {"note": note},
-        "Rerun the relevant verification command and record evidence.",
-    )
-
-
-def exec_complete_task(args):
-    bundle = load_bundle()
-    status = bundle["status"]
-    task = find_task(bundle, args.task_id)
-    if status.get("current_task") != args.task_id or task_status(bundle).get(args.task_id) != "Doing":
-        raise ExError(f"task is not currently Doing: {args.task_id}")
-    missing = required_evidence_missing(bundle, task)
-    if missing:
-        raise ExError("required evidence missing: " + ", ".join(missing))
-    status["tasks"][args.task_id] = "Done"
-    status["current_task"] = None
-    write_yaml(bundle["plan_dir"] / "status.yaml", status)
-    print_result(
-        {"task": args.task_id, "status": "Done"},
-        "Run `co exec status` to choose the next ready task or finish.",
-        "co exec status",
-    )
-
-
-def exec_halt(args):
-    bundle = load_bundle()
-    if args.kind not in {"user_decision", "external_environment"}:
-        raise ExError("halt kind must be user_decision or external_environment")
-    if args.task:
-        find_task(bundle, args.task)
-    status = bundle["status"]
-    status["phase"] = "halted"
-    status["halt"] = {"kind": args.kind, "task": args.task, "reason": args.reason}
-    write_yaml(bundle["plan_dir"] / "status.yaml", status)
-    affects = ["status.yaml#halt"]
-    if args.task:
-        affects.insert(0, f"task:{args.task}")
-    note = append_note(
-        bundle["plan_dir"],
-        "halt",
-        f"Execution halted: {args.reason}",
-        args.kind,
-        affects,
-        "co exec halt",
-    )
-    print_result(
-        {"phase": "halted", "halt": status["halt"], "note": note},
-        "Stop execution and report the halt reason to the user.",
-    )
-
-
-def exec_finish(_args):
-    bundle = load_bundle()
-    if bundle["status"].get("phase") == "halted":
-        raise ExError("cannot finish while phase is halted")
-    if not can_finish(bundle):
-        remaining = [task_id for task_id, state in task_status(bundle).items() if state != "Done"]
-        finals = [task["id"] for task in final_tasks(bundle) if task_status(bundle).get(task["id"]) != "Done"]
-        raise ExError(f"cannot finish; remaining={remaining}, final_verification_remaining={finals}")
-    status = bundle["status"]
-    status["phase"] = "complete"
-    status["current_task"] = None
-    write_yaml(bundle["plan_dir"] / "status.yaml", status)
-    print_result({"phase": "complete"}, "Report final completion to the user.")
 
 
 def flow_mode_from_phase(phase):
@@ -4270,7 +3891,7 @@ def main(argv=None):
                 mode="error",
             )
         else:
-            print_result(data, exc.required_action, exc.next_command)
+            print_yaml(result_with_required_action(data, exc.required_action, exc.next_command))
         return 1
     except ExError as exc:
         if getattr(args, "command", None) == "flow":
