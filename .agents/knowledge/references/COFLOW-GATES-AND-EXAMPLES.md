@@ -1,6 +1,6 @@
 # Gates And Examples
 
-This file defines the plan-execute gates enforced by `co flow`.
+This file defines the plan-execute gates enforced by `co.py flow`.
 It is a CLI maintenance reference, not default root-agent context.
 
 ## Planner Readiness Gate
@@ -8,10 +8,13 @@ It is a CLI maintenance reference, not default root-agent context.
 A bundle is planner-ready only when:
 
 - `.agents/plan/exec.yaml` points to the active `.agents/plan/{plan-id}/`.
-- The bundle was created with `co flow init`.
-- `interview.yaml` is closed with every required ambiguity track closed.
+- The bundle was created with `co.py flow init`.
+- `interview.yaml` stores the initial request and is closed by CLI-owned interview gates.
 - latest ambiguity score is fresh, `<= 0.2`, and all clarity floors pass.
-- `draft.md` is written for user review and approved through `co flow respond --stdin`.
+- completion candidate streak is at least 2.
+- closure audit passed for the current score and round count.
+- `plan_seed.yaml` exists and matches the closed interview.
+- `draft.md` is written for user review and approved through `co.py flow respond --stdin`.
 - `plan.yaml` contains goal, context, non-goals, constraints, success criteria, verification policy, execution strategy, and stop conditions.
 - `tasks.yaml` contains no status fields.
 - `tasks.yaml` has at least one `kind: final_verification` task.
@@ -20,19 +23,23 @@ A bundle is planner-ready only when:
 - every expected evidence path is a relative path under `evidence/`.
 - `status.yaml` task ids match `tasks.yaml` task ids.
 - `status.yaml.review.status` is `passed`.
-- `status.yaml.review.fingerprint` matches current `plan.yaml`, `tasks.yaml`, and `interview.yaml`.
+- `status.yaml.review.fingerprint` matches current `plan.yaml`, `tasks.yaml`, `interview.yaml`, and `plan_seed.yaml`.
 - `notes.yaml` and `evidence.yaml` are present and CLI-managed.
 - `status.yaml.phase` reaches `ready_for_exec`.
 
 ## Interview Gate
 
-- `co flow init` creates `interview.yaml` with required tracks open.
-- `co flow next/respond` records every material question and answer.
-- User-judgment answers require a matching pending question created by `co flow`.
+- `co.py flow init` creates `request.yaml` and `interview.yaml` with the initial request.
+- `co.py flow next/respond` records every material question and answer.
+- User-judgment answers require a matching pending question created by `co.py flow`.
 - Route sources must match `from-code...`, `from-user...`, or `from-research...`.
-- Closure requires at least one round for every required track.
-- Closure requires user-judgment rounds on `scope`, `outputs`, and `verification`.
-- Closure requires one answered hidden-assumption follow-up after ambiguity scoring reaches readiness.
+- Closure requires at least three answered rounds.
+- The six interview tracks are extraction labels, not a fixed user-question checklist.
+- Ambiguity scoring is not used for closure before the third answered round.
+- Closure requires two consecutive readiness candidates.
+- Closure requires a passed closure audit that checks material implementation decisions.
+- Closure requires `plan_seed.yaml` before bundle authoring.
+- Skip-eligible questions can be intentionally deferred and recorded in `deferred_items`.
 - `code_fact` and `research_confirmation` increment `non_user_answer_streak`.
 - `user_decision` and `code_plus_decision` reset `non_user_answer_streak`.
 - Once `non_user_answer_streak` reaches 3, the next record must be `user_decision` or `code_plus_decision`.
@@ -42,31 +49,32 @@ A bundle is planner-ready only when:
 - Clarity floors must pass: goal `0.75`, constraints `0.65`, success criteria `0.70`, brownfield context `0.60`.
 - Meaning-changing draft feedback reopens the relevant track internally before new answers are recorded.
 
-## Pre-Draft Review Gate
+## Bundle Review Gate
 
-- Pre-draft review runs through `co flow next/respond`.
+- The persisted review stage remains `pre-draft`.
+- Review runs after `bundle_author` writes `draft.md`, `plan.yaml`, and `tasks.yaml`.
 - `contract_reviewer` and `verification_reviewer` run in parallel.
 - Both reviewers must return `PASS`.
 - Review results are recorded in `notes.yaml`.
-- Passing review stores `status.yaml.review.status: passed` and a fingerprint over `plan.yaml`, `tasks.yaml`, and `interview.yaml`.
-- If those files change after review, `co flow` reruns review before presenting or approving the draft.
+- Passing review stores `status.yaml.review.status: passed` and a fingerprint over `plan.yaml`, `tasks.yaml`, `interview.yaml`, and `plan_seed.yaml`.
+- If those files change after review, `co.py flow` reruns review before presenting or approving the draft.
 
 ## Execution Gate
 
 The executor must:
 
-- Start each loop with `co flow next`.
+- Start each loop with `co.py flow next`.
 - Execute only the task returned by `root_action.task`.
 - Keep exactly one task in `Doing`.
-- Record verification artifacts through `co flow evidence`.
-- Repair only through `co flow repair`.
-- Halt only through `co flow halt`.
-- Finish only when `co flow next` returns `root_action.type: report_complete`.
+- Record verification artifacts through `co.py flow evidence`.
+- Repair only through `co.py flow repair`.
+- Halt only through `co.py flow halt`.
+- Finish only when `co.py flow next` returns `root_action.type: report_complete`.
 
 ## In-Contract Failure Gate
 
 - Verification failures, missing evidence, stale file scope, and in-contract repair needs keep the task in `Doing`.
-- Use `co flow halt` only for `user_decision` or `external_environment`.
+- Use `co.py flow halt` only for `user_decision` or `external_environment`.
 - `halted` is not complete and cannot return `report_complete`.
 
 ## Evidence Gate
@@ -79,7 +87,7 @@ A task with `verification.evidence_required: true` is done only when:
 
 ## Repair Gate
 
-`co flow repair` may modify only contract-compatible envelope fields:
+`co.py flow repair` may modify only contract-compatible envelope fields:
 
 - `files`
 - `implementation_notes`

@@ -6,7 +6,7 @@ coflow's plan and exec strategy is inspired by the local Ouroboros project.
 Ouroboros provides the source concept for specification-first planning, ambiguity-gated handoff, structured execution, and post-work evaluation.
 
 This repository is not a full Ouroboros port.
-coflow adapts the concept for Codex App and Codex CLI users by putting the durable control surface into a repo-local `co` CLI and Codex skill instructions.
+coflow adapts the concept for Codex App and Codex CLI users by putting the durable control surface into a repo-local `co.py` CLI and Codex skill instructions.
 When the two designs differ, prefer coflow's current runtime contract unless the task is explicitly to make coflow closer to Ouroboros.
 
 The actual local reference repository is `/Users/mj/projects/ouroboros`.
@@ -38,7 +38,7 @@ Important source locations:
 ## Command Surfaces
 
 Ouroboros has two command surfaces, and they are not one-to-one equivalents.
-This matters for coflow because coflow intentionally avoids a broad MCP/plugin surface and instead makes `co` the mechanical manager.
+This matters for coflow because coflow intentionally avoids a broad MCP/plugin surface and instead makes `co.py` the mechanical manager.
 
 Important source locations:
 
@@ -81,9 +81,9 @@ Use Ouroboros as a concept source, not as a strict compatibility target.
 
 - Ouroboros has interview, seed, execute, evaluate, evolve, MCP tools, plugin skills, event sourcing, runtime adapters, and optional persistent loops.
 - coflow currently ships two Codex skills: `skills/coplan` and `skills/coexec`.
-- coflow's durable state is `.agents/plan/{plan-id}` and the mechanical manager is `skills/coplan/scripts/co`.
-- coflow's root agent should stay thinner than the historical Ouroboros skill surface: run `co flow`, parse YAML, and perform only the returned `root_action`.
-- If a design idea from Ouroboros is adopted, prefer implementing it as a `co` command, validation rule, stdout field, or bundle schema change instead of only adding prose to `SKILL.md`.
+- coflow's durable state is `.agents/plan/{plan-id}` and the mechanical manager is `skills/coplan/scripts/co.py`.
+- coflow's root agent should stay thinner than the historical Ouroboros skill surface: run `co.py flow`, parse YAML, and perform only the returned `root_action`.
+- If a design idea from Ouroboros is adopted, prefer implementing it as a `co.py` command, validation rule, stdout field, or bundle schema change instead of only adding prose to `SKILL.md`.
 
 ## Detailed References
 

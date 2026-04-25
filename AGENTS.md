@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-coflow is a repository of Codex skills for planning and executing work through the shared `co` CLI.
+coflow is a repository of Codex skills for planning and executing work through the shared `co.py` CLI.
 It currently ships two skills:
 
 - `skills/coplan`: planner-only skill that turns ambiguous work into a gated plan bundle.
@@ -10,7 +10,7 @@ It currently ships two skills:
 
 ## Tech Stack
 
-- Python CLI: `skills/coplan/scripts/co`.
+- Python CLI: `skills/coplan/scripts/co.py`.
 - Codex skill manifests and instructions: `skills/*/SKILL.md`.
 - YAML metadata: `skills/*/agents/openai.yaml`.
 - User-facing Markdown docs: `COPLAN.md` and `COEXEC.md`.
@@ -22,7 +22,7 @@ It currently ships two skills:
 - Start with `.agents/knowledge/runtime.md` for the repo-level runtime map.
 - Use `skills/coplan/SKILL.md` when planning a new bundle.
 - Use `skills/coexec/SKILL.md` when executing an approved bundle.
-- Treat `skills/coplan/scripts/co flow` stdout YAML and `root_action` as the runtime contract.
+- Treat `skills/coplan/scripts/co.py flow` stdout YAML and `root_action` as the runtime contract.
 - When changing either the plan bundle/planner side or the executor side, keep the plan-exec concept synchronized so `coplan` still produces an executable static contract and `coexec` still executes it without making new planning decisions.
 - Migration paths and backward compatibility are not required for repository changes unless the user explicitly asks for them.
 
@@ -30,7 +30,7 @@ It currently ships two skills:
 
 - Start with `.agents/knowledge/verification.md`.
 - There is no project-level test runner or CI config in this repository.
-- For CLI changes, use `python3 -m py_compile skills/coplan/scripts/co` and targeted `skills/coplan/scripts/co ...` command checks.
+- For CLI changes, use `python3 -m py_compile skills/coplan/scripts/co.py` and targeted `skills/coplan/scripts/co.py ...` command checks.
 - For knowledge changes, verify root routing and repo-root-relative path references.
 
 ## UI Surface

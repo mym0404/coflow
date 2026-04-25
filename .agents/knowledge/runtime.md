@@ -10,25 +10,25 @@ coflow provides two complementary Codex skills:
 The runtime has three roles:
 
 - Root agent: the Codex App or Codex CLI agent in the user-facing session.
-- `co` CLI: the flow manager and mechanical owner of state transitions.
-- Codex CLI agents: subprocess subagents launched by `co` for bounded JSON judgments.
+- `co.py` CLI: the flow manager and mechanical owner of state transitions.
+- Codex CLI agents: subprocess subagents launched by `co.py` for bounded JSON judgments.
 
-The root agent should interact with bundles through `skills/coplan/scripts/co flow`.
+The root agent should interact with bundles through `skills/coplan/scripts/co.py flow`.
 The CLI prints YAML, and `root_action` is the next-step contract.
 The root agent should not compute gate readiness, interview next steps, ambiguity, review status, task readiness, task completion, or execution finish state itself.
 
 ## Flow Ownership
 
-`co` exists because Codex App and Codex CLI users do not have a development SDK that lets this repository enforce agent behavior directly in code.
-The reliable control point is therefore the `co flow` contract:
+`co.py` exists because Codex App and Codex CLI users do not have a development SDK that lets this repository enforce agent behavior directly in code.
+The reliable control point is therefore the `co.py flow` contract:
 
-- `co` owns bundle files, validation, state transitions, notes, evidence records, review freshness, halt gates, and finish gates.
+- `co.py` owns bundle files, validation, state transitions, notes, evidence records, review freshness, halt gates, and finish gates.
 - Root-agent-facing skill instructions should keep the agent as a thin `root_action` adapter.
-- If `co` can decide or validate a step mechanically, prefer adding the rule to `skills/coplan/scripts/co` over relying on prose instructions in the root agent skill.
-- Codex CLI subagents are implementation details of `co`; their JSON output is normalized by `co` before it reaches the root agent.
-- Codex CLI subagents run through isolated ephemeral `codex exec` calls with parent session env stripped, coflow nesting depth capped, user config ignored, and plugin feature loading disabled so MCP/plugin state from the parent session does not affect bounded JSON judgments.
-- Interview routing, scoring thresholds, reviewer prompts, and reviewer schemas are CLI internals in `skills/coplan/scripts/co`, not root-agent reference material.
-- Root-facing `co flow` stdout should not expose internal scores, route or track metadata, reviewer findings, progress snapshots, or command allowlists unless that data is required to perform the current `root_action`.
+- If `co.py` can decide or validate a step mechanically, prefer adding the rule to `skills/coplan/scripts/co.py` over relying on prose instructions in the root agent skill.
+- Codex CLI subagents are implementation details of `co.py`; their JSON output is normalized by `co.py` before it reaches the root agent.
+- Codex CLI subagents run through isolated ephemeral `codex exec` calls with parent session env stripped, coflow nesting depth capped, and plugin feature loading disabled so MCP/plugin state from the parent session does not affect bounded JSON judgments while user-level Codex instructions remain available.
+- Interview routing, scoring thresholds, reviewer prompts, and reviewer schemas are CLI internals in `skills/coplan/scripts/co.py`, not root-agent reference material.
+- Root-facing `co.py flow` stdout should not expose internal scores, route or track metadata, reviewer findings, progress snapshots, or command allowlists unless that data is required to perform the current `root_action`.
 
 The plan and exec strategy is modeled after the local Ouroboros project, especially its specification-first interview, ambiguity gate, execution orchestration, and evaluation gate ideas.
 The local Ouroboros project root for live code comparison is `/Users/mj/projects/ouroboros`.
@@ -42,7 +42,7 @@ Keep planning and execution concepts synchronized whenever changing either side 
 - When changing the executable plan bundle, planner gates, task schema, or `exec.yaml` handoff, verify that `coexec` can still execute the approved plan without making new planning decisions.
 - When changing executor behavior, status output, repair rules, evidence handling, halt rules, or finish gates, verify that `coplan` still produces a bundle with enough static contract for that executor.
 - The planner side owns the approved user contract; the executor side owns sequential local execution, progress state, evidence, repair, halt, and finish.
-- If a behavior change blurs that boundary, update `skills/coplan/SKILL.md`, `skills/coexec/SKILL.md`, and `skills/coplan/scripts/co` together. Update `.agents/knowledge/references/COFLOW-BUNDLE-SCHEMA.md` or `.agents/knowledge/references/COFLOW-GATES-AND-EXAMPLES.md` only when CLI-owned schema or gate details change.
+- If a behavior change blurs that boundary, update `skills/coplan/SKILL.md`, `skills/coexec/SKILL.md`, and `skills/coplan/scripts/co.py` together. Update `.agents/knowledge/references/COFLOW-BUNDLE-SCHEMA.md` or `.agents/knowledge/references/COFLOW-GATES-AND-EXAMPLES.md` only when CLI-owned schema or gate details change.
 
 ## Workflow Docs
 
@@ -62,7 +62,7 @@ Keep user-facing graphs and root-agent skill prompts synchronized with runtime b
 ## Flow Log
 
 Each active plan records an append-only runtime trace at `.agents/plan/{plan-id}/flow_log.ndjson`.
-The log is always on for `co flow` and is for development feedback, not user-facing contract state.
+The log is always on for `co.py flow` and is for development feedback, not user-facing contract state.
 `notes.yaml` remains the durable contract and decision note surface; `flow_log.ndjson` records runtime behavior for later analysis.
 
 The log uses JSON Lines.
@@ -72,7 +72,7 @@ Raw user answers, raw prompts, and full draft bodies are not stored; the CLI rec
 
 High-value event families:
 
-- `flow.command.*` shows public `co flow` command boundaries and errors.
+- `flow.command.*` shows public `co.py flow` command boundaries and errors.
 - `root_action.emit` shows exactly where control returns to the root agent.
 - `interview.*` shows pending question creation, answer recording, ambiguity scoring, and interview closure.
 - `codex_agent.*` shows private Codex CLI subagent execution behind the CLI.
@@ -83,7 +83,7 @@ High-value event families:
 Use the flow log to check responsibility boundaries:
 
 - Root stays thin when each `root_action.emit` is followed by an allowed `flow.command.*` boundary instead of direct bundle edits.
-- Interview behaves like an iterator when one `flow respond` is followed by CLI-owned scoring, hidden-assumption follow-up, closure, question creation, authoring, or draft presentation events.
+- Interview behaves like an iterator when one `flow respond` is followed by CLI-owned scoring, closure audit, seed generation, question creation, authoring, or draft presentation events.
 - Codex CLI agents remain internal details when `codex_agent.*` appears between CLI events rather than as root-facing commands.
 - Executor task selection stays in the CLI when `task.claimed` and `task.completed` are emitted by flow events.
 - Verification failure reaches the right boundary when failed `evidence.recorded` is followed by `root_action.emit` with `repair_task`.
@@ -94,14 +94,14 @@ Use `skills/coplan/SKILL.md` as the planner entrypoint.
 
 Core flow:
 
-- initialize with `skills/coplan/scripts/co flow init --plan-id <id> --title "<title>"`.
-- continue with `skills/coplan/scripts/co flow next`.
-- ask exact `root_action.question` values and pipe answers to `co flow respond --stdin`.
-- present exact `root_action.draft` values and pipe approval or feedback to `co flow respond --stdin`.
+- initialize with `skills/coplan/scripts/co.py flow init --plan-id <id> --title "<title>" --stdin` or `--prompt "<request>"`.
+- continue with `skills/coplan/scripts/co.py flow next`.
+- ask exact `root_action.question` values and pipe answers to `co.py flow respond --stdin`.
+- present exact `root_action.draft` values and pipe approval or feedback to `co.py flow respond --stdin`.
 - switch to `coexec` when `root_action.type` becomes `execute_task` or `repair_task`; report and stop on `report_halt`, `report_complete`, or `report_error`.
 
 The root agent does not directly edit bundle files.
-CLI-owned files include `draft.md`, `plan.yaml`, `tasks.yaml`, `planning_context.yaml`, `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml`.
+CLI-owned files include `request.yaml`, `plan_seed.yaml`, `draft.md`, `plan.yaml`, `tasks.yaml`, `planning_context.yaml`, `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml`.
 
 ## Executor Path
 
@@ -109,22 +109,22 @@ Use `skills/coexec/SKILL.md` as the executor entrypoint.
 
 Core flow:
 
-- start each loop with `skills/coplan/scripts/co flow next`.
+- start each loop with `skills/coplan/scripts/co.py flow next`.
 - implement only `root_action.task` when `root_action.type: execute_task`.
-- record verification output with `co flow evidence`.
-- repair only task envelope fields with `co flow repair`.
-- halt only through `co flow halt`.
+- record verification output with `co.py flow evidence`.
+- repair only task envelope fields with `co.py flow repair`.
+- halt only through `co.py flow halt`.
 - report completion only after `root_action.type: report_complete`.
 - report CLI errors only through `root_action.type: report_error`.
 
 Executor work must not redesign the approved plan contract.
-If a needed change would alter user-visible behavior, acceptance criteria, task order, dependencies, or non-goals, halt through `co flow halt`.
+If a needed change would alter user-visible behavior, acceptance criteria, task order, dependencies, or non-goals, halt through `co.py flow halt`.
 
 ## Reference Tier
 
-- `skills/coplan/SKILL.md` describes the root-agent planner workflow and `co flow` stdout contract.
-- `skills/coexec/SKILL.md` describes the root-agent executor workflow and `co flow` stdout contract.
+- `skills/coplan/SKILL.md` describes the root-agent planner workflow and `co.py flow` stdout contract.
+- `skills/coexec/SKILL.md` describes the root-agent executor workflow and `co.py flow` stdout contract.
 - `.agents/knowledge/references/COFLOW-BUNDLE-SCHEMA.md` describes CLI-owned bundle files and required fields for maintenance.
 - `.agents/knowledge/references/COFLOW-GATES-AND-EXAMPLES.md` describes CLI-owned planner and executor gates for maintenance.
 - `.agents/knowledge/references/COFLOW-EXAMPLE-BUNDLE.md` is only a density and shape example.
-- Internal interview and pre-draft review algorithms live in `skills/coplan/scripts/co`; repo knowledge records the ownership rule, not a separate root-facing reference file.
+- Internal interview, closure audit, seed extraction, and bundle review algorithms live in `skills/coplan/scripts/co.py`; repo knowledge records the ownership rule, not a separate root-facing reference file.

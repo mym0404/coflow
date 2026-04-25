@@ -15,6 +15,7 @@ from pathlib import Path
 
 PLAN_ROOT = Path(".agents/plan")
 EXEC_FILE = PLAN_ROOT / "exec.yaml"
+CLI_COMMAND_NAME = "co.py"
 BOOTSTRAP_DIR = Path.home() / ".cache" / "codex-co"
 BOOTSTRAP_VENV = BOOTSTRAP_DIR / "venv"
 BOOTSTRAP_PYTHON = BOOTSTRAP_VENV / "bin" / "python"
@@ -49,29 +50,36 @@ INTERVIEW_REQUIRED_TRACKS = (
     "stop_conditions",
 )
 INTERVIEW_REQUIRED_TRACK_SET = set(INTERVIEW_REQUIRED_TRACKS)
-INTERVIEW_REQUIRED_USER_TRACKS = ("scope", "outputs", "verification")
+INTERVIEW_REQUIRED_USER_TRACKS = ()
 INTERVIEW_NON_USER_ROUTES = {"code_fact", "research_confirmation"}
 INTERVIEW_USER_ROUTES = {"user_decision", "code_plus_decision"}
 INTERVIEW_NON_USER_STREAK_LIMIT = 3
 INTERVIEW_TRACK_FOCUS_LIMIT = 3
-INTERVIEW_MIN_TOTAL_ROUNDS = len(INTERVIEW_REQUIRED_TRACKS)
-INTERVIEW_MIN_USER_ROUNDS = len(INTERVIEW_REQUIRED_USER_TRACKS)
+INTERVIEW_MIN_TOTAL_ROUNDS = 3
+INTERVIEW_MIN_USER_ROUNDS = 1
+INTERVIEW_COMPLETION_CANDIDATE_STREAK_REQUIRED = 2
+INTERVIEW_CLOSURE_AUDIT_STATUSES = {"not_run", "passed", "failed"}
+INTERVIEW_SKIP_KINDS = {"defer", "decide_later"}
 INTERVIEW_CLOSURE_CHECKS = (
     "desired_output_explicit",
     "user_tradeoffs_explicit",
-    "hidden_assumptions_reviewed",
+    "closure_audit_passed",
     "executor_determinism",
     "verification_proves_behavior",
     "no_material_questions",
 )
 INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE = "hidden_assumption_followup"
-INTERVIEW_QUESTION_PURPOSES = {INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE}
+INTERVIEW_CLOSURE_AUDIT_PURPOSE = "closure_audit_followup"
+INTERVIEW_QUESTION_PURPOSES = {
+    INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE,
+    INTERVIEW_CLOSURE_AUDIT_PURPOSE,
+}
 INTERVIEW_CLOSURE_CHECK_SUMMARIES = {
-    "desired_output_explicit": "Desired output is captured by the interview tracks.",
-    "user_tradeoffs_explicit": "User-owned tradeoffs are recorded before drafting.",
-    "hidden_assumptions_reviewed": "A hidden-assumption follow-up was answered before closure.",
+    "desired_output_explicit": "Seed captures the intended output before drafting.",
+    "user_tradeoffs_explicit": "Material user-owned tradeoffs are settled or intentionally deferred.",
+    "closure_audit_passed": "Seed Closer audit passed before bundle authoring.",
     "executor_determinism": "Executor inputs are deterministic enough for a static plan.",
-    "verification_proves_behavior": "Verification criteria are recorded for executor proof.",
+    "verification_proves_behavior": "Verification expectations are explicit enough for executor proof.",
     "no_material_questions": "No material user question remains pending.",
 }
 INTERVIEW_SOURCE_PREFIXES = {
@@ -172,7 +180,7 @@ def require_yaml():
 def bootstrap_pyyaml(original_exc):
     if os.environ.get("EX_BOOTSTRAPPED") == "1":
         raise ExError(
-            "PyYAML is required but bootstrap failed. Run `co doctor` for details."
+            f"PyYAML is required but bootstrap failed. Run `{CLI_COMMAND_NAME} doctor` for details."
         ) from original_exc
     try:
         BOOTSTRAP_DIR.mkdir(parents=True, exist_ok=True)
@@ -193,7 +201,7 @@ def bootstrap_pyyaml(original_exc):
         )
     except Exception as exc:
         raise ExError(
-            "PyYAML bootstrap failed. Run `co doctor` for details. "
+            f"PyYAML bootstrap failed. Run `{CLI_COMMAND_NAME} doctor` for details. "
             f"Original import error: {original_exc}"
         ) from exc
     reexec_with_bootstrap_python()
@@ -493,7 +501,6 @@ def build_codex_exec_command(
         "--json",
         "--skip-git-repo-check",
         "--ephemeral",
-        "--ignore-user-config",
         "-c",
         f'model_reasoning_effort="{CODEX_AGENT_REASONING_EFFORT}"',
         "--sandbox",
@@ -685,6 +692,7 @@ def file_path(plan_dir, name):
         "draft": "draft.md",
         "plan": "plan.yaml",
         "tasks": "tasks.yaml",
+        "plan-seed": "plan_seed.yaml",
         "planning-context": "planning_context.yaml",
         "interview": "interview.yaml",
         "status": "status.yaml",
@@ -783,6 +791,7 @@ def exec_notes_view(bundle, current_id):
 def load_bundle():
     plan_id, plan_dir = active_plan()
     planning_context_path = plan_dir / "planning_context.yaml"
+    plan_seed_path = plan_dir / "plan_seed.yaml"
     return {
         "plan_id": plan_id,
         "plan_dir": plan_dir,
@@ -790,6 +799,7 @@ def load_bundle():
         "plan": load_yaml(plan_dir / "plan.yaml"),
         "tasks": load_yaml(plan_dir / "tasks.yaml"),
         "planning_context": load_yaml(planning_context_path) if planning_context_path.exists() else None,
+        "plan_seed": load_yaml(plan_seed_path) if plan_seed_path.exists() else None,
         "interview": load_yaml(plan_dir / "interview.yaml"),
         "status": load_yaml(plan_dir / "status.yaml"),
         "notes": load_yaml(plan_dir / "notes.yaml"),
@@ -865,9 +875,21 @@ def validate_plan(data):
     require_fields(data, required, "plan.yaml")
 
 
-def default_interview():
+def default_closure_audit():
+    return {
+        "status": "not_run",
+        "summary": "",
+        "material_blockers": [],
+        "question": "",
+        "round_count": 0,
+        "score_id": None,
+    }
+
+
+def default_interview(initial_context=""):
     return {
         "status": "open",
+        "initial_context": initial_context,
         "non_user_answer_streak": 0,
         "required_tracks": {
             track: {"status": "open", "summary": ""}
@@ -877,6 +899,10 @@ def default_interview():
         "pending_user_question": None,
         "agent_runs": [],
         "ambiguity": {"latest": None, "history": []},
+        "ambiguity_ledger": [],
+        "completion_candidate_streak": 0,
+        "closure_audit": default_closure_audit(),
+        "deferred_items": [],
         "closure": {
             "ready": False,
             "summary": "",
@@ -890,22 +916,34 @@ def default_interview():
 
 
 def validate_interview(data):
+    data.setdefault("initial_context", "")
+    data.setdefault("ambiguity_ledger", [])
+    data.setdefault("completion_candidate_streak", 0)
+    data.setdefault("closure_audit", default_closure_audit())
+    data.setdefault("deferred_items", [])
     require_fields(
         data,
         [
             "status",
+            "initial_context",
             "non_user_answer_streak",
             "required_tracks",
             "rounds",
             "pending_user_question",
             "agent_runs",
             "ambiguity",
+            "ambiguity_ledger",
+            "completion_candidate_streak",
+            "closure_audit",
+            "deferred_items",
             "closure",
         ],
         "interview.yaml",
     )
     if data["status"] not in INTERVIEW_STATUSES:
         raise ExError("interview.yaml status must be open or closed")
+    if not isinstance(data["initial_context"], str):
+        raise ExError("interview.yaml initial_context must be a string")
     if not isinstance(data["non_user_answer_streak"], int) or data["non_user_answer_streak"] < 0:
         raise ExError("interview.yaml non_user_answer_streak must be a non-negative integer")
     tracks = data["required_tracks"]
@@ -955,8 +993,23 @@ def validate_interview(data):
         purpose = pending.get("purpose")
         if purpose is not None and purpose not in INTERVIEW_QUESTION_PURPOSES:
             raise ExError("pending_user_question purpose is invalid")
+        skip_eligible = pending.get("skip_eligible", False)
+        if not isinstance(skip_eligible, bool):
+            raise ExError("pending_user_question skip_eligible must be true or false")
+        skip_kind = pending.get("skip_kind")
+        if skip_kind is not None and skip_kind not in INTERVIEW_SKIP_KINDS:
+            raise ExError("pending_user_question skip_kind is invalid")
     if not isinstance(data["agent_runs"], list):
         raise ExError("interview.yaml agent_runs must be a list")
+    if not isinstance(data["ambiguity_ledger"], list):
+        raise ExError("interview.yaml ambiguity_ledger must be a list")
+    if (
+        not isinstance(data["completion_candidate_streak"], int)
+        or data["completion_candidate_streak"] < 0
+    ):
+        raise ExError("interview.yaml completion_candidate_streak must be a non-negative integer")
+    if not isinstance(data["deferred_items"], list):
+        raise ExError("interview.yaml deferred_items must be a list")
     ambiguity = data["ambiguity"]
     if not isinstance(ambiguity, dict):
         raise ExError("interview.yaml ambiguity must be a mapping")
@@ -965,6 +1018,26 @@ def validate_interview(data):
         raise ExError("interview.yaml ambiguity.latest must be null or a mapping")
     if not isinstance(ambiguity["history"], list):
         raise ExError("interview.yaml ambiguity.history must be a list")
+    audit = data["closure_audit"]
+    if not isinstance(audit, dict):
+        raise ExError("interview.yaml closure_audit must be a mapping")
+    require_fields(
+        audit,
+        ["status", "summary", "material_blockers", "question", "round_count", "score_id"],
+        "interview.yaml closure_audit",
+    )
+    if audit["status"] not in INTERVIEW_CLOSURE_AUDIT_STATUSES:
+        raise ExError("interview.yaml closure_audit.status is invalid")
+    if not isinstance(audit["summary"], str):
+        raise ExError("interview.yaml closure_audit.summary must be a string")
+    if not isinstance(audit["material_blockers"], list):
+        raise ExError("interview.yaml closure_audit.material_blockers must be a list")
+    if not isinstance(audit["question"], str):
+        raise ExError("interview.yaml closure_audit.question must be a string")
+    if not isinstance(audit["round_count"], int) or audit["round_count"] < 0:
+        raise ExError("interview.yaml closure_audit.round_count must be a non-negative integer")
+    if audit["score_id"] is not None and not isinstance(audit["score_id"], str):
+        raise ExError("interview.yaml closure_audit.score_id must be a string or null")
     closure = data["closure"]
     if not isinstance(closure, dict):
         raise ExError("interview.yaml closure must be a mapping")
@@ -978,6 +1051,8 @@ def validate_interview(data):
     checks = closure["checks"]
     if not isinstance(checks, dict):
         raise ExError("interview.yaml closure.checks must be a mapping")
+    for check_name in INTERVIEW_CLOSURE_CHECKS:
+        checks.setdefault(check_name, {"passed": False, "summary": ""})
     missing_checks = sorted(set(INTERVIEW_CLOSURE_CHECKS) - set(checks.keys()))
     if missing_checks:
         raise ExError("interview.yaml closure.checks missing: " + ", ".join(missing_checks))
@@ -1003,6 +1078,10 @@ def interview_open_tracks(interview):
 
 def interview_user_round_count(interview):
     return sum(1 for item in interview.get("rounds", []) if item.get("route") in INTERVIEW_USER_ROUTES)
+
+
+def interview_answered_round_count(interview):
+    return len(interview.get("rounds", []))
 
 
 def interview_round_tracks(interview):
@@ -1048,11 +1127,19 @@ def hidden_assumption_followup(latest):
         "route": "user_decision",
         "track": "constraints",
         "question": (
-            "Before finalizing this plan, what hidden assumption from the existing "
-            "codebase, docs, or product behavior should the executor verify instead "
-            "of deciding locally?"
+            "Before finalizing this plan, what implementation-changing assumption "
+            "about the existing codebase, docs, or product behavior should be settled?"
         ),
     }
+
+
+def is_deferred_answer(answer):
+    normalized = str(answer).strip().lower()
+    if normalized.startswith("intentional deferral"):
+        return True
+    if normalized in {"skip", "defer", "deferred", "decide later", "later", "unknown"}:
+        return True
+    return any(token in normalized for token in ["보류", "나중", "몰라", "모름"])
 
 
 def interview_closure_blockers(interview):
@@ -1063,21 +1150,19 @@ def interview_closure_blockers(interview):
     user_rounds = interview_user_round_count(interview)
     if user_rounds < INTERVIEW_MIN_USER_ROUNDS:
         blockers.append(f"user_judgment_rounds<{INTERVIEW_MIN_USER_ROUNDS}")
-    track_counts, user_track_counts = interview_round_tracks(interview)
-    missing_tracks = [track for track, count in track_counts.items() if count == 0]
-    if missing_tracks:
-        blockers.append("uncovered_tracks=" + ",".join(missing_tracks))
-    missing_user_tracks = [
-        track
-        for track in INTERVIEW_REQUIRED_USER_TRACKS
-        if user_track_counts.get(track, 0) == 0
-    ]
-    if missing_user_tracks:
-        blockers.append("missing_user_judgment_tracks=" + ",".join(missing_user_tracks))
     if interview.get("non_user_answer_streak", 0) >= INTERVIEW_NON_USER_STREAK_LIMIT:
         blockers.append("non_user_answer_streak_requires_user_judgment")
-    if interview_hidden_assumption_required(interview):
-        blockers.append("hidden_assumptions_unreviewed")
+    if interview.get("completion_candidate_streak", 0) < INTERVIEW_COMPLETION_CANDIDATE_STREAK_REQUIRED:
+        blockers.append(
+            "completion_candidate_streak"
+            f"<{INTERVIEW_COMPLETION_CANDIDATE_STREAK_REQUIRED}"
+        )
+    audit = interview.get("closure_audit", {})
+    latest = interview.get("ambiguity", {}).get("latest") or {}
+    if audit.get("status") != "passed":
+        blockers.append("closure_audit_not_passed")
+    elif audit.get("round_count") != len(rounds) or audit.get("score_id") != latest.get("id"):
+        blockers.append("closure_audit_stale")
     missing_checks = [
         check
         for check, state in interview.get("closure", {}).get("checks", {}).items()
@@ -1094,6 +1179,8 @@ def interview_ambiguity_blockers(interview):
     if not isinstance(latest, dict):
         return ["missing_ambiguity_score"]
     blockers = []
+    if interview_answered_round_count(interview) < INTERVIEW_MIN_TOTAL_ROUNDS:
+        blockers.append(f"total_rounds<{INTERVIEW_MIN_TOTAL_ROUNDS}")
     if latest.get("round_count") != len(interview.get("rounds", [])):
         blockers.append("ambiguity_score_stale")
     score = latest.get("ambiguity")
@@ -1287,9 +1374,13 @@ def validate_task_graph_acyclic(graph):
 
 def planning_context_fingerprint(interview):
     payload = {
+        "initial_context": interview.get("initial_context"),
         "required_tracks": interview.get("required_tracks"),
         "rounds": interview.get("rounds"),
         "ambiguity_latest": interview.get("ambiguity", {}).get("latest"),
+        "completion_candidate_streak": interview.get("completion_candidate_streak"),
+        "closure_audit": interview.get("closure_audit"),
+        "deferred_items": interview.get("deferred_items"),
         "closure": interview.get("closure"),
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -1315,7 +1406,7 @@ def planning_context_coverage(interview):
         "missing_tracks": missing_tracks,
         "missing_user_decision_tracks": missing_user_decision_tracks,
         "verification_ready": bool(str(verification_summary).strip()),
-        "hidden_assumptions_reviewed": interview_hidden_assumptions_reviewed(interview),
+        "closure_audit_passed": interview.get("closure_audit", {}).get("status") == "passed",
     }
 
 
@@ -1374,8 +1465,13 @@ def build_planning_context(plan_id, plan_dir, title, interview):
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "round_count": len(rounds),
         },
+        "initial_context": interview.get("initial_context", ""),
         "track_context": track_context,
         "facts": facts,
+        "deferred_items": interview.get("deferred_items", []),
+        "completion_candidate_streak": interview.get("completion_candidate_streak", 0),
+        "closure_audit": interview.get("closure_audit", default_closure_audit()),
+        "plan_seed": load_plan_seed(plan_dir) if (plan_dir / "plan_seed.yaml").exists() else None,
         "coverage": coverage,
         "ambiguity": {
             "ready": latest.get("ready") is True,
@@ -1401,20 +1497,10 @@ def planning_context_gate_failures(interview):
     material_blockers = interview.get("closure", {}).get("material_blockers", [])
     if material_blockers:
         failures.append("material_blockers=" + ",".join(str(item) for item in material_blockers))
-    open_tracks = interview_open_tracks(interview)
-    if open_tracks:
-        failures.append("open_tracks=" + ",".join(open_tracks))
     coverage = planning_context_coverage(interview)
-    if coverage["missing_tracks"]:
-        failures.append("missing_tracks=" + ",".join(coverage["missing_tracks"]))
-    if coverage["missing_user_decision_tracks"]:
-        failures.append(
-            "missing_user_decision_tracks="
-            + ",".join(coverage["missing_user_decision_tracks"])
-        )
     failures.extend(interview_ambiguity_blockers(interview))
-    if interview_hidden_assumption_required(interview):
-        failures.append("hidden_assumptions_unreviewed")
+    if interview.get("closure_audit", {}).get("status") != "passed":
+        failures.append("closure_audit_not_passed")
     missing_checks = [
         check
         for check, state in interview.get("closure", {}).get("checks", {}).items()
@@ -1422,33 +1508,27 @@ def planning_context_gate_failures(interview):
     ]
     if missing_checks:
         failures.append("missing_closure_checks=" + ",".join(missing_checks))
-    if not coverage["verification_ready"]:
-        failures.append("verification_summary_empty")
     return failures
 
 
 def planning_context_required_action(failures, interview):
     if "pending_user_question" in failures:
-        return "Ask the pending user question exactly, then record the answer with `co planner interview record`."
+        return f"Ask the pending user question exactly, then record the answer with `{CLI_COMMAND_NAME} flow respond --stdin`."
     if any(item in failures for item in ["missing_ambiguity_score", "ambiguity_score_stale", "ambiguity_score_missing"]):
-        return "Run `co planner interview score --mode auto`, then rerun `co planner generate-skeleton`."
+        return f"Run `{CLI_COMMAND_NAME} flow next` so the CLI can score or ask the next question."
     if any(item.startswith("ambiguity>") or item == "ambiguity_ready=false" or item.startswith("clarity_floors_failed=") for item in failures):
         latest = interview.get("ambiguity", {}).get("latest") or {}
         followup = latest.get("recommended_followup")
         if followup:
             return f"Ask or record the recommended follow-up: {followup}"
-        return "Run `co planner interview ask-next` to collect the missing clarification."
-    if "hidden_assumptions_unreviewed" in failures:
-        latest = interview.get("ambiguity", {}).get("latest") or {}
-        followup = hidden_assumption_followup(latest)
-        return f"Ask or record the hidden-assumption follow-up: {followup}"
-    if any(item.startswith("missing_user_decision_tracks=") for item in failures):
-        return "Ask the user for the missing decision track, record the answer, rescore, close the track, and rerun `co planner generate-skeleton`."
+        return f"Run `{CLI_COMMAND_NAME} flow next` to collect the missing clarification."
+    if "closure_audit_not_passed" in failures:
+        return "Run the closure audit through `co.py flow next`; ask exactly one returned follow-up if needed."
     if any(item.startswith("missing_closure_checks=") for item in failures):
-        return "Run the missing `co planner interview closure-check ...` commands, then rerun `co planner generate-skeleton`."
-    if any(item.startswith("open_tracks=") or item == "interview_not_closed" for item in failures):
-        return "Close remaining interview tracks and run `co planner interview close --summary \"...\"`, then rerun `co planner generate-skeleton`."
-    return "Resolve the planning context gate failures, then rerun `co planner generate-skeleton`."
+        return "Rerun `co.py flow next` so the CLI can complete closure checks after audit."
+    if "interview_not_closed" in failures:
+        return "Continue `co.py flow next` until the CLI closes the interview or returns a user question."
+    return "Resolve the planning context gate failures, then rerun `co.py flow next`."
 
 
 def default_review_state():
@@ -1522,18 +1602,100 @@ def review_fingerprint(plan_dir):
         "plan": load_yaml(plan_dir / "plan.yaml"),
         "tasks": load_yaml(plan_dir / "tasks.yaml"),
         "interview": load_yaml(plan_dir / "interview.yaml"),
+        "plan_seed": load_plan_seed(plan_dir) if (plan_dir / "plan_seed.yaml").exists() else None,
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def load_plan_seed(plan_dir):
+    path = plan_dir / "plan_seed.yaml"
+    if not path.exists():
+        raise ExError("plan_seed.yaml is missing")
+    data = load_yaml(path)
+    validate_plan_seed(data)
+    return data
+
+
+def validate_plan_seed(data):
+    require_fields(
+        data,
+        [
+            "status",
+            "generated_at",
+            "round_count",
+            "ambiguity_score_id",
+            "closure_audit",
+            "seed",
+        ],
+        "plan_seed.yaml",
+    )
+    if data["status"] != "ready":
+        raise ExError("plan_seed.yaml status must be ready")
+    seed = data["seed"]
+    if not isinstance(seed, dict):
+        raise ExError("plan_seed.yaml seed must be a mapping")
+    require_fields(
+        seed,
+        [
+            "title",
+            "goal",
+            "context",
+            "non_goals",
+            "constraints",
+            "success_criteria",
+            "verification_expectations",
+            "execution_boundaries",
+            "source_round_ids",
+            "deferred_items",
+            "summary",
+        ],
+        "plan_seed.yaml seed",
+    )
+    if not str(seed.get("goal", "")).strip():
+        raise ExError("plan_seed.yaml seed.goal must not be empty")
+    for field in [
+        "context",
+        "non_goals",
+        "constraints",
+        "success_criteria",
+        "verification_expectations",
+        "execution_boundaries",
+        "source_round_ids",
+        "deferred_items",
+    ]:
+        if not isinstance(seed[field], list):
+            raise ExError(f"plan_seed.yaml seed.{field} must be a list")
+
+
+def plan_seed_is_current(plan_dir, interview=None):
+    if not (plan_dir / "plan_seed.yaml").exists():
+        return False
+    interview = interview or load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    latest = interview.get("ambiguity", {}).get("latest") or {}
+    audit = interview.get("closure_audit", {})
+    try:
+        seed = load_plan_seed(plan_dir)
+    except ExError:
+        return False
+    return (
+        seed.get("round_count") == len(interview.get("rounds", []))
+        and seed.get("ambiguity_score_id") == latest.get("id")
+        and seed.get("closure_audit", {}).get("status") == "passed"
+        and audit.get("status") == "passed"
+        and audit.get("round_count") == len(interview.get("rounds", []))
+        and audit.get("score_id") == latest.get("id")
+    )
+
+
 def require_review_passed(plan_dir, status, action):
     review = status.get("review", {})
     if review.get("status") != "passed":
-        raise ExError(f"{action} requires pre-draft review PASS")
+        raise ExError(f"{action} requires bundle review PASS")
     current_fingerprint = review_fingerprint(plan_dir)
     if review.get("fingerprint") != current_fingerprint:
-        raise ExError(f"{action} requires fresh pre-draft review PASS")
+        raise ExError(f"{action} requires fresh bundle review PASS")
 
 
 def reset_review_status(plan_dir):
@@ -1646,6 +1808,7 @@ def command_review_context(_args):
         "draft": bundle["draft"],
         "plan": bundle["plan"],
         "tasks": bundle["tasks"],
+        "plan_seed": bundle["plan_seed"],
         "planning_context": bundle["planning_context"],
         "interview": bundle["interview"],
         "status": bundle["status"],
@@ -1687,7 +1850,7 @@ def command_doctor(_args):
         "current_python_yaml_error": current_error,
         "bootstrap_python_exists": BOOTSTRAP_PYTHON.exists(),
         "bootstrap_python_yaml": venv_yaml,
-        "required_action": "If current_python_yaml or bootstrap_python_yaml is true, continue the requested co flow; otherwise resolve the reported Python or PyYAML environment issue.",
+        "required_action": f"If current_python_yaml or bootstrap_python_yaml is true, continue the requested {CLI_COMMAND_NAME} flow; otherwise resolve the reported Python or PyYAML environment issue.",
     }
     print_simple_yaml(data)
 
@@ -1784,10 +1947,14 @@ def planner_interview_status(_args):
 
 
 def agent_context(plan_dir):
+    plan_seed_path = plan_dir / "plan_seed.yaml"
+    request_path = plan_dir / "request.yaml"
     bundle = {
         "draft": read_text_file(plan_dir / "draft.md"),
         "plan": load_yaml(plan_dir / "plan.yaml"),
         "tasks": load_yaml(plan_dir / "tasks.yaml"),
+        "request": load_yaml(request_path) if request_path.exists() else None,
+        "plan_seed": load_yaml(plan_seed_path) if plan_seed_path.exists() else None,
         "planning_context": load_yaml(plan_dir / "planning_context.yaml")
         if (plan_dir / "planning_context.yaml").exists()
         else None,
@@ -1851,9 +2018,21 @@ def ask_next_schema():
             "question": {"type": "string"},
             "answer": {"type": "string"},
             "source": {"type": "string"},
+            "skip_eligible": {"type": "boolean"},
+            "skip_kind": {"type": "string", "enum": ["defer", "decide_later"]},
             "reason": {"type": "string"},
         },
-        "required": ["action", "route", "track", "question", "answer", "source", "reason"],
+        "required": [
+            "action",
+            "route",
+            "track",
+            "question",
+            "answer",
+            "source",
+            "skip_eligible",
+            "skip_kind",
+            "reason",
+        ],
     }
 
 
@@ -1905,6 +2084,67 @@ def score_schema():
     }
 
 
+def closure_audit_schema():
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "action": {"type": "string", "enum": ["pass", "ask_user"]},
+            "route": {"type": "string", "enum": sorted(INTERVIEW_USER_ROUTES)},
+            "track": {"type": "string", "enum": list(INTERVIEW_REQUIRED_TRACKS)},
+            "question": {"type": "string"},
+            "summary": {"type": "string"},
+            "material_blockers": {"type": "array", "items": {"type": "string"}},
+            "skip_eligible": {"type": "boolean"},
+            "skip_kind": {"type": "string", "enum": ["defer", "decide_later"]},
+        },
+        "required": [
+            "action",
+            "route",
+            "track",
+            "question",
+            "summary",
+            "material_blockers",
+            "skip_eligible",
+            "skip_kind",
+        ],
+    }
+
+
+def plan_seed_schema():
+    string_array = {"type": "array", "items": {"type": "string"}}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "title": {"type": "string"},
+            "goal": {"type": "string"},
+            "context": string_array,
+            "non_goals": string_array,
+            "constraints": string_array,
+            "success_criteria": string_array,
+            "verification_expectations": string_array,
+            "execution_boundaries": string_array,
+            "source_round_ids": string_array,
+            "deferred_items": string_array,
+            "summary": {"type": "string"},
+        },
+        "required": [
+            "title",
+            "goal",
+            "context",
+            "non_goals",
+            "constraints",
+            "success_criteria",
+            "verification_expectations",
+            "execution_boundaries",
+            "source_round_ids",
+            "deferred_items",
+            "summary",
+        ],
+    }
+
+
 def review_schema():
     return {
         "type": "object",
@@ -1921,9 +2161,14 @@ def review_schema():
 
 def ask_next_prompt(plan_dir):
     return (
-        "You are the coplan interview agent. Inspect the provided bundle context and choose the single next action that most reduces planning ambiguity.\n"
-        "Return JSON only. If user judgment is needed, action=ask_user with route user_decision or code_plus_decision. If you can safely record a repo/research fact from the provided context, action=record_fact with route code_fact or research_confirmation. If enough material exists for scoring, action=ready_for_score.\n"
-        "Use one of these tracks: scope, non_goals, outputs, verification, constraints, stop_conditions. Do not self-answer user-owned decisions.\n\n"
+        "You are the coplan Socratic interviewer. Inspect the original request, transcript, ambiguity snapshot, and bundle context; choose the single next action that most reduces implementation-changing ambiguity.\n"
+        "Return JSON only. Ask about the user's intent, core change, ownership, public behavior, or non-obvious tradeoff. Do not ask process questions about how to build a plan bundle, how to verify the planner, or how many agents to run unless that is the user's actual task.\n"
+        "If user judgment is needed, action=ask_user with route user_decision or code_plus_decision. If a repo/research fact is enough and directly grounded in context, action=record_fact with route code_fact or research_confirmation. If at least three answered rounds exist and no material question remains, action=ready_for_score.\n"
+        "Use tracks only as extraction labels: scope, non_goals, outputs, verification, constraints, stop_conditions. Never force a checklist order across those tracks.\n"
+        "Brownfield hint: prefer questions about the intended behavioral boundary, source of truth, API/protocol ownership, lifecycle/recovery, migration, or cross-client impact when those could change the implementation.\n"
+        "Perspective panel: user-intent guardian asks what outcome changes; maintainer asks what existing behavior must survive; executor asks what static decision it would otherwise have to make; verifier asks what proof is minimally sufficient; Seed Closer asks which unresolved choice would invalidate the plan.\n"
+        "Answer prefix guidance: ask concise questions that invite concrete answers like 'Change...', 'Preserve...', 'Exclude...', or 'Prove with...'.\n"
+        "Set skip_eligible=true only for useful details that can be intentionally deferred without changing the plan contract; set skip_eligible=false for material implementation decisions. Use skip_kind=defer for optional detail and decide_later for explicit future decisions.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
     )
 
@@ -1933,8 +2178,28 @@ def score_prompt(plan_dir, project_mode):
         "You are the coplan ambiguity scoring agent. Score requirement clarity from 0.0 to 1.0. Use low-variance judgment; scoring_temperature_intent is 0.1. Return JSON only.\n"
         "Score goal_clarity, constraint_clarity, success_criteria_clarity, and context_clarity. For greenfield, still provide context_clarity but it will not be weighted.\n"
         f"Requested project_mode: {project_mode}.\n"
-        "Set recommended_followup to the single best question for exposing a hidden assumption, user-owned tradeoff, or brownfield context gap before execution. For brownfield work with weak context_clarity, prefer a repository-specific code/docs/behavior boundary question.\n"
+        "Treat intentional deferrals in deferred_items as settled unless they would force the executor to choose behavior, ownership, migration, or verification policy. Set recommended_followup to the single best question for exposing a user-owned tradeoff or brownfield context gap before execution. For brownfield work with weak context_clarity, prefer a repository-specific code/docs/behavior boundary question.\n"
         "Do not declare readiness in prose; the CLI will compute weighted clarity and ambiguity.\n\n"
+        f"Context:\n{agent_context(plan_dir)}"
+    )
+
+
+def closure_audit_prompt(plan_dir):
+    return (
+        "You are the coplan closure_auditor using Seed Closer criteria. Decide only whether the interview is ready for plan_seed extraction and bundle authoring. Return JSON only.\n"
+        "A low ambiguity score is not sufficient. PASS only when no implementation-changing decision remains for ownership/source of truth, API/protocol, lifecycle/recovery, migration, cross-client impact, execution boundaries, or verification expectations.\n"
+        "If any material decision remains, action=ask_user and ask exactly one highest-impact follow-up. Do not ask about planning mechanics, bundle files, reviewer setup, or validation process unless the user's task is specifically about those systems.\n"
+        "Set skip_eligible=false for material blockers. Use skip_eligible=true only when the item can be intentionally deferred without changing executor behavior.\n\n"
+        f"Context:\n{agent_context(plan_dir)}"
+    )
+
+
+def plan_seed_prompt(plan_dir):
+    return (
+        "You are the coplan seed_architect. Extract an internal plan seed from the original request, interview transcript, ambiguity ledger, closure audit, and deferred items. Return JSON only.\n"
+        "The seed is the source of truth for bundle_author. It must capture the user's intended core change, constraints, success criteria, non-goals, context, verification expectations, and execution boundaries without inventing new decisions.\n"
+        "Use the six tracks only as classification hints; do not require every track to have a transcript item. Preserve intentional deferrals as deferred_items only when they do not force executor planning.\n"
+        "No TBD placeholders. If something material is missing, the closure audit should have failed earlier; extract the best settled contract from the transcript.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
     )
 
@@ -1942,22 +2207,33 @@ def score_prompt(plan_dir, project_mode):
 def reviewer_prompt(plan_dir, reviewer):
     if reviewer == "contract_reviewer":
         focus = (
-            "Review hidden decisions, scope drift, contradictions, task DAG assumptions, file scope, and acceptance criteria. "
-            "Block if the plan asks execution to choose between materially different user-visible behaviors."
+            "Review whether draft.md, plan.yaml, and tasks.yaml faithfully implement plan_seed.yaml. "
+            "Block hidden decisions, scope drift, contradictions, task DAG assumptions, file scope problems, and acceptance criteria that ask execution to choose between materially different user-visible behaviors."
         )
     else:
         focus = (
-            "Review verification commands, evidence, final verification, and success signals. "
-            "Block if verification would not prove the user's intended behavior."
+            "Review whether verification commands, evidence, final verification, and success signals are minimally sufficient for plan_seed.yaml. "
+            "Block if verification would not prove the user's intended behavior or if it asks the executor to invent proof policy."
         )
     return (
         f"You are the {reviewer} for a coplan bundle. {focus}\n"
-        "Return JSON only with status PASS or FAIL. Do not re-check mechanical schema fields owned by CLI validation unless the semantics are meaningless.\n\n"
+        "Return JSON only with status PASS or FAIL. This is a post-author bundle review even though the persisted stage name is pre-draft. Do not re-check mechanical schema fields owned by CLI validation unless the semantics are meaningless.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
     )
 
 
-def create_pending_question(plan_dir, interview, route, track, question, *, purpose=None, enforce_focus=True):
+def create_pending_question(
+    plan_dir,
+    interview,
+    route,
+    track,
+    question,
+    *,
+    purpose=None,
+    enforce_focus=True,
+    skip_eligible=False,
+    skip_kind=None,
+):
     if interview.get("status") == "closed":
         raise ExError("interview is closed; reopen a track before asking more questions")
     if interview.get("pending_user_question") is not None:
@@ -1968,6 +2244,8 @@ def create_pending_question(plan_dir, interview, route, track, question, *, purp
         raise ExError("interview ask only supports user_decision or code_plus_decision")
     if purpose is not None and purpose not in INTERVIEW_QUESTION_PURPOSES:
         raise ExError(f"unknown interview question purpose: {purpose}")
+    if skip_kind is not None and skip_kind not in INTERVIEW_SKIP_KINDS:
+        raise ExError(f"unknown interview skip kind: {skip_kind}")
     if enforce_focus:
         focus_blocker = interview_focus_blocker(interview, track)
         if focus_blocker:
@@ -1977,9 +2255,12 @@ def create_pending_question(plan_dir, interview, route, track, question, *, purp
         "route": route,
         "track": track,
         "question": question,
+        "skip_eligible": bool(skip_eligible),
     }
     if purpose:
         pending["purpose"] = purpose
+    if skip_kind is not None:
+        pending["skip_kind"] = skip_kind
     interview["pending_user_question"] = pending
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
@@ -1990,6 +2271,8 @@ def create_pending_question(plan_dir, interview, route, track, question, *, purp
         route=route,
         track=track,
         purpose=purpose,
+        skip_eligible=bool(skip_eligible),
+        skip_kind=skip_kind,
         question_hash=hash_text(question),
         question_bytes=len(question.encode("utf-8")),
     )
@@ -2148,7 +2431,7 @@ def planner_interview_score(args):
     reset_review_status(plan_dir)
     print_result(
         {"ambiguity": score},
-        "Ask the recommended follow-up when ambiguity is not ready or hidden assumptions are not reviewed; otherwise close tracks, pass closure checks, and close the interview.",
+        "Ask the recommended follow-up when ambiguity is not ready; otherwise continue the CLI-owned closure audit and seed flow.",
     )
 
 
@@ -2555,7 +2838,7 @@ def planner_review_run(args):
             plan_dir,
             "decision" if review_status == "PASS" else "risk",
             f"{reviewer} {review_status}: {result['summary']}",
-            "Codex CLI pre-draft plan review.",
+            "Codex CLI bundle review.",
             ["plan.yaml", "tasks.yaml"],
             "co planner review run",
         )
@@ -3024,7 +3307,7 @@ def active_plan_summary(bundle):
 
 
 def continue_flow_action(message):
-    return {"type": "continue_flow", "message": message, "next_command": "co flow next"}
+    return {"type": "continue_flow", "message": message, "next_command": f"{CLI_COMMAND_NAME} flow next"}
 
 
 def report_error_action(message):
@@ -3035,18 +3318,22 @@ def report_error_action(message):
 
 
 def ask_user_action(pending):
-    return {
+    action = {
         "type": "ask_user",
         "question": pending["question"],
-        "response_command": "co flow respond --stdin",
+        "response_command": f"{CLI_COMMAND_NAME} flow respond --stdin",
     }
+    if pending.get("skip_eligible"):
+        action["skip_eligible"] = True
+        action["skip_kind"] = pending.get("skip_kind") or "defer"
+    return action
 
 
 def present_draft_action(plan_dir):
     return {
         "type": "present_draft",
         "draft": read_text_file(plan_dir / "draft.md"),
-        "response_command": "co flow respond --stdin",
+        "response_command": f"{CLI_COMMAND_NAME} flow respond --stdin",
     }
 
 
@@ -3086,7 +3373,7 @@ def task_root_action(bundle, action_type):
     return action
 
 
-def init_plan(plan_id, title, replace=False):
+def init_plan(plan_id, title, replace=False, initial_context=""):
     require_yaml()
     validate_plan_id(plan_id)
     plan_dir = PLAN_ROOT / plan_id
@@ -3103,7 +3390,7 @@ def init_plan(plan_id, title, replace=False):
                 DRAFT_PLACEHOLDER_MARKER,
                 f"# {title}",
                 "",
-                "Draft is pending. Run `co flow next` to continue planning.",
+                f"Draft is pending. Run `{CLI_COMMAND_NAME} flow next` to continue planning.",
                 "",
             ]
         ),
@@ -3124,7 +3411,8 @@ def init_plan(plan_id, title, replace=False):
         },
     )
     write_yaml(plan_dir / "tasks.yaml", {"tasks": []})
-    write_yaml(plan_dir / "interview.yaml", default_interview())
+    write_yaml(plan_dir / "request.yaml", {"title": title, "prompt": initial_context})
+    write_yaml(plan_dir / "interview.yaml", default_interview(initial_context))
     write_yaml(
         plan_dir / "status.yaml",
         {
@@ -3149,35 +3437,12 @@ def track_summary_from_rounds(interview, track):
     return " / ".join(answers[-2:]) if answers else ""
 
 
-def deterministic_interview_question(interview):
-    track_counts, user_track_counts = interview_round_tracks(interview)
-    for track in INTERVIEW_REQUIRED_USER_TRACKS:
-        if user_track_counts.get(track, 0) == 0:
-            return {
-                "route": "user_decision",
-                "track": track,
-                "question": {
-                    "scope": "What exact scope should this plan include?",
-                    "outputs": "What concrete output should the executor produce?",
-                    "verification": "What evidence or command should prove the work is complete?",
-                }[track],
-            }
-    for track in INTERVIEW_REQUIRED_TRACKS:
-        if track_counts.get(track, 0) == 0:
-            return {
-                "route": "user_decision",
-                "track": track,
-                "question": {
-                    "non_goals": "What should this plan explicitly exclude?",
-                    "constraints": "What constraints must the executor preserve?",
-                    "stop_conditions": "When should execution halt instead of making a local decision?",
-                }.get(track, f"What decision should define the {track} track?"),
-            }
+def non_user_streak_question(interview):
     if interview.get("non_user_answer_streak", 0) >= INTERVIEW_NON_USER_STREAK_LIMIT:
         return {
             "route": "user_decision",
             "track": "scope",
-            "question": "Before using more inferred facts, what user-owned decision should guide this plan?",
+            "question": "Before using more inferred facts, what user-owned intent or tradeoff should guide this plan?",
         }
     return None
 
@@ -3205,11 +3470,13 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
             raise ExError("user-judgment answer must match the pending user question")
         round_id = pending["id"]
         purpose = pending.get("purpose")
+        skip_kind = pending.get("skip_kind") if pending.get("skip_eligible") else None
     else:
         if pending is not None:
             raise ExError("record the pending user answer before adding non-user interview facts")
         round_id = next_id(interview.get("rounds", []), "Q")
         purpose = None
+        skip_kind = None
     round_item = {
         "id": round_id,
         "route": route,
@@ -3220,6 +3487,18 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
     }
     if purpose:
         round_item["purpose"] = purpose
+    if skip_kind and is_deferred_answer(answer):
+        round_item["deferred"] = True
+        round_item["skip_kind"] = skip_kind
+        interview.setdefault("deferred_items", []).append(
+            {
+                "round_id": round_id,
+                "track": track,
+                "kind": skip_kind,
+                "question": question,
+                "answer": answer,
+            }
+        )
     interview.setdefault("rounds", []).append(round_item)
     interview["non_user_answer_streak"] = (
         interview.get("non_user_answer_streak", 0) + 1
@@ -3229,6 +3508,9 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
     interview["status"] = "open"
     interview["pending_user_question"] = None
     interview["closure"]["ready"] = False
+    interview["closure"]["summary"] = ""
+    interview["closure_audit"] = default_closure_audit()
+    interview["completion_candidate_streak"] = 0
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
@@ -3249,6 +3531,10 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
 def score_interview_internal(plan_dir, mode="auto"):
     interview = load_yaml(plan_dir / "interview.yaml")
     validate_interview(interview)
+    if interview_answered_round_count(interview) < INTERVIEW_MIN_TOTAL_ROUNDS:
+        raise ExError(
+            f"ambiguity scoring requires at least {INTERVIEW_MIN_TOTAL_ROUNDS} answered interview rounds"
+        )
     output = run_interview_codex_agent(
         plan_dir,
         interview,
@@ -3261,6 +3547,21 @@ def score_interview_internal(plan_dir, mode="auto"):
     ambiguity = interview.setdefault("ambiguity", {"latest": None, "history": []})
     ambiguity.setdefault("history", []).append(score)
     ambiguity["latest"] = score
+    interview.setdefault("ambiguity_ledger", []).append(
+        {
+            "score_id": score["id"],
+            "round_count": score["round_count"],
+            "ambiguity": score["ambiguity"],
+            "ready": score["ready"],
+            "weakest_dimension": score["weakest_dimension"],
+            "summary": score["summary"],
+        }
+    )
+    if score.get("ready") is True:
+        interview["completion_candidate_streak"] = interview.get("completion_candidate_streak", 0) + 1
+    else:
+        interview["completion_candidate_streak"] = 0
+    interview["closure_audit"] = default_closure_audit()
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
@@ -3276,18 +3577,120 @@ def score_interview_internal(plan_dir, mode="auto"):
     return score
 
 
+def closure_audit_is_current(interview):
+    latest = interview.get("ambiguity", {}).get("latest") or {}
+    audit = interview.get("closure_audit", {})
+    return (
+        audit.get("status") == "passed"
+        and audit.get("round_count") == len(interview.get("rounds", []))
+        and audit.get("score_id") == latest.get("id")
+    )
+
+
+def run_closure_audit_internal(plan_dir):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    latest = interview.get("ambiguity", {}).get("latest") or {}
+    if latest.get("ready") is not True:
+        raise ExError("closure audit requires a ready ambiguity score")
+    if interview.get("completion_candidate_streak", 0) < INTERVIEW_COMPLETION_CANDIDATE_STREAK_REQUIRED:
+        raise ExError("closure audit requires readiness streak")
+    output = run_interview_codex_agent(
+        plan_dir,
+        interview,
+        "closure_auditor",
+        closure_audit_prompt(plan_dir),
+        closure_audit_schema(),
+    )
+    interview = load_yaml(plan_dir / "interview.yaml")
+    audit = {
+        "status": "passed" if output["action"] == "pass" else "failed",
+        "summary": output["summary"],
+        "material_blockers": output.get("material_blockers", []),
+        "question": output.get("question", ""),
+        "round_count": len(interview.get("rounds", [])),
+        "score_id": latest.get("id"),
+    }
+    if audit["status"] == "passed" and audit["material_blockers"]:
+        raise ExError("closure_auditor cannot pass with material_blockers")
+    interview["closure_audit"] = audit
+    interview["closure"]["material_blockers"] = list(output.get("material_blockers", []))
+    validate_interview(interview)
+    write_yaml(plan_dir / "interview.yaml", interview)
+    reset_review_status(plan_dir)
+    append_flow_log(
+        plan_dir,
+        "interview.closure_audit",
+        status=audit["status"],
+        score_id=audit["score_id"],
+        blocker_count=len(audit["material_blockers"]),
+        question_hash=hash_text(audit["question"]),
+    )
+    if output["action"] == "ask_user":
+        if not str(output.get("question", "")).strip():
+            raise ExError("closure_auditor ask_user requires a question")
+        pending = create_pending_question(
+            plan_dir,
+            load_yaml(plan_dir / "interview.yaml"),
+            output["route"],
+            output["track"],
+            output["question"],
+            purpose=INTERVIEW_CLOSURE_AUDIT_PURPOSE,
+            enforce_focus=False,
+            skip_eligible=output.get("skip_eligible") is True,
+            skip_kind=output.get("skip_kind"),
+        )
+        return {"root_action": ask_user_action(pending)}
+    return {"audit": audit}
+
+
+def write_plan_seed_internal(plan_dir):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    if not closure_audit_is_current(interview):
+        raise ExError("plan_seed.yaml requires a current passed closure audit")
+    output = run_interview_codex_agent(
+        plan_dir,
+        interview,
+        "seed_architect",
+        plan_seed_prompt(plan_dir),
+        plan_seed_schema(),
+    )
+    latest = interview.get("ambiguity", {}).get("latest") or {}
+    plan_seed = {
+        "status": "ready",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "round_count": len(interview.get("rounds", [])),
+        "ambiguity_score_id": latest.get("id"),
+        "closure_audit": interview.get("closure_audit"),
+        "seed": output,
+    }
+    validate_plan_seed(plan_seed)
+    write_yaml(plan_dir / "plan_seed.yaml", plan_seed)
+    reset_review_status(plan_dir)
+    append_flow_log(
+        plan_dir,
+        "plan_seed.generated",
+        round_count=plan_seed["round_count"],
+        ambiguity_score_id=plan_seed["ambiguity_score_id"],
+        goal_hash=hash_text(output.get("goal")),
+    )
+    return plan_seed
+
+
 def close_interview_if_ready(plan_dir):
     interview = load_yaml(plan_dir / "interview.yaml")
     validate_interview(interview)
     latest = interview.get("ambiguity", {}).get("latest") or {}
-    coverage = planning_context_coverage(interview)
     if latest.get("ready") is not True:
-        return False
-    if coverage["missing_tracks"] or coverage["missing_user_decision_tracks"]:
         return False
     if interview.get("pending_user_question") is not None:
         return False
     if interview.get("closure", {}).get("material_blockers"):
+        return False
+    if not closure_audit_is_current(interview):
+        return False
+    if not plan_seed_is_current(plan_dir, interview):
         return False
     for track in INTERVIEW_REQUIRED_TRACKS:
         interview["required_tracks"][track]["status"] = "closed"
@@ -3326,7 +3729,7 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
             return ask_user_action(pending)
         if interview_draft_ready(interview):
             return None
-        question = deterministic_interview_question(interview)
+        question = non_user_streak_question(interview)
         if question:
             pending = create_pending_question(
                 plan_dir,
@@ -3334,6 +3737,45 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
                 question["route"],
                 question["track"],
                 question["question"],
+            )
+            return ask_user_action(pending)
+        if interview_answered_round_count(interview) < INTERVIEW_MIN_TOTAL_ROUNDS:
+            output = run_interview_codex_agent(
+                plan_dir,
+                interview,
+                "ask-next",
+                ask_next_prompt(plan_dir),
+                ask_next_schema(),
+            )
+            if output["action"] == "ask_user":
+                interview = load_yaml(plan_dir / "interview.yaml")
+                pending = create_pending_question(
+                    plan_dir,
+                    interview,
+                    output["route"],
+                    output["track"],
+                    output["question"],
+                    skip_eligible=output.get("skip_eligible") is True,
+                    skip_kind=output.get("skip_kind"),
+                )
+                return ask_user_action(pending)
+            if output["action"] == "record_fact":
+                record_interview_round(
+                    plan_dir,
+                    route=output["route"],
+                    track=output["track"],
+                    question=output["question"],
+                    answer=output["answer"],
+                    source=output["source"],
+                )
+                continue
+            pending = create_pending_question(
+                plan_dir,
+                load_yaml(plan_dir / "interview.yaml"),
+                "user_decision",
+                "scope",
+                "What is the core change you want this plan to preserve above all else?",
+                enforce_focus=False,
             )
             return ask_user_action(pending)
         latest = interview.get("ambiguity", {}).get("latest")
@@ -3344,34 +3786,37 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
         followup = latest.get("recommended_followup")
         if followup and latest.get("ready") is not True:
             interview = load_yaml(plan_dir / "interview.yaml")
-            followup = hidden_assumption_followup(latest)
+            if not (
+                isinstance(followup, dict)
+                and followup.get("route") in INTERVIEW_USER_ROUTES
+                and followup.get("track") in INTERVIEW_REQUIRED_TRACK_SET
+                and str(followup.get("question", "")).strip()
+            ):
+                followup = hidden_assumption_followup(latest)
             pending = create_pending_question(
                 plan_dir,
                 interview,
                 followup["route"],
                 followup["track"],
                 followup["question"],
-                purpose=(
-                    None
-                    if interview_hidden_assumptions_reviewed(interview)
-                    else INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE
-                ),
                 enforce_focus=False,
             )
             return ask_user_action(pending)
-        if interview_hidden_assumption_required(load_yaml(plan_dir / "interview.yaml"), latest):
-            interview = load_yaml(plan_dir / "interview.yaml")
-            followup = hidden_assumption_followup(latest)
-            pending = create_pending_question(
-                plan_dir,
-                interview,
-                followup["route"],
-                followup["track"],
-                followup["question"],
-                purpose=INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE,
-                enforce_focus=False,
-            )
-            return ask_user_action(pending)
+        interview = load_yaml(plan_dir / "interview.yaml")
+        if (
+            latest.get("ready") is True
+            and interview.get("completion_candidate_streak", 0)
+            >= INTERVIEW_COMPLETION_CANDIDATE_STREAK_REQUIRED
+            and not closure_audit_is_current(interview)
+        ):
+            audit_result = run_closure_audit_internal(plan_dir)
+            if audit_result.get("root_action"):
+                return audit_result["root_action"]
+            continue
+        interview = load_yaml(plan_dir / "interview.yaml")
+        if closure_audit_is_current(interview) and not plan_seed_is_current(plan_dir, interview):
+            write_plan_seed_internal(plan_dir)
+            continue
         if close_interview_if_ready(plan_dir):
             return None
         interview = load_yaml(plan_dir / "interview.yaml")
@@ -3390,6 +3835,8 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
                 output["route"],
                 output["track"],
                 output["question"],
+                skip_eligible=output.get("skip_eligible") is True,
+                skip_kind=output.get("skip_kind"),
             )
             return ask_user_action(pending)
         if output["action"] == "record_fact":
@@ -3403,6 +3850,8 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
             )
             continue
         if output["action"] == "ready_for_score":
+            if interview_answered_round_count(load_yaml(plan_dir / "interview.yaml")) < INTERVIEW_MIN_TOTAL_ROUNDS:
+                continue
             score_interview_internal(plan_dir)
             continue
     raise ExError("interview flow did not reach a root boundary")
@@ -3537,7 +3986,8 @@ def bundle_author_prompt(plan_dir, review_results=None, feedback=None):
         extra += "\nUser draft feedback to apply:\n" + feedback
     return (
         "You are the coplan bundle_author. Produce final draft.md, plan.yaml, and tasks.yaml content as JSON only.\n"
-        "Inspect the repository if needed. Do not edit files directly. Do not leave TBD placeholders.\n"
+        "Use plan_seed.yaml as the source of truth. Inspect the repository only to ground implementation boundaries and commands. Do not edit files directly. Do not leave TBD placeholders.\n"
+        "Do not expand, narrow, or reinterpret the seed. If feedback is present, apply it only within the approved seed unless it is wording-only feedback from draft review.\n"
         "Every task must satisfy the coflow task schema and include at least one final_verification task.\n"
         "Every expected_evidence.file must be a relative artifact path under evidence/, such as evidence/t01-preflight.txt.\n"
         "Keep execution decisions static so the executor does not need to plan.\n\n"
@@ -3579,6 +4029,10 @@ def write_authored_bundle(plan_dir, output):
 
 def validate_bundle_internal(plan_dir):
     require_interview_closed(plan_dir, "flow validation")
+    interview = load_yaml(plan_dir / "interview.yaml")
+    if not plan_seed_is_current(plan_dir, interview):
+        raise ExError("plan_seed.yaml must match the closed interview")
+    load_plan_seed(plan_dir)
     validate_draft_markdown(plan_dir)
     plan = load_yaml(plan_dir / "plan.yaml")
     tasks = load_yaml(plan_dir / "tasks.yaml")
@@ -3619,9 +4073,9 @@ def run_review_internal(plan_dir):
             plan_dir,
             "decision" if review_status == "PASS" else "risk",
             f"{reviewer} {review_status}: {result['summary']}",
-            "Codex CLI pre-draft plan review.",
+            "Codex CLI bundle review.",
             ["plan.yaml", "tasks.yaml"],
-            "co flow next",
+            f"{CLI_COMMAND_NAME} flow next",
         )
     previous_status = status
     status = load_yaml(plan_dir / "status.yaml")
@@ -3646,7 +4100,34 @@ def run_review_internal(plan_dir):
     return {"review": status["review"], "results": results}
 
 
+def review_followup_question(review_results):
+    for result in review_results or []:
+        issues = result.get("issues") if isinstance(result, dict) else None
+        if isinstance(issues, list) and issues:
+            issue = str(issues[0]).strip()
+            reviewer = str(result.get("reviewer", "reviewer"))
+            track = "verification" if "verification" in reviewer else "constraints"
+            return {
+                "track": track,
+                "question": (
+                    "Bundle review could not resolve this seed conflict without user intent: "
+                    f"{issue} What should the approved plan contract say?"
+                ),
+            }
+    return {
+        "track": "constraints",
+        "question": (
+            "Bundle review found a plan_seed conflict that the author could not repair. "
+            "What user-facing contract should take precedence?"
+        ),
+    }
+
+
 def author_and_review_until_boundary(plan_dir, feedback=None):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    validate_interview(interview)
+    if not plan_seed_is_current(plan_dir, interview):
+        raise ExError("bundle authoring requires a current plan_seed.yaml")
     review_results = None
     validation_feedback = None
     for _ in range(3):
@@ -3694,15 +4175,21 @@ def author_and_review_until_boundary(plan_dir, feedback=None):
     interview = load_yaml(plan_dir / "interview.yaml")
     interview["status"] = "open"
     interview["closure"]["ready"] = False
-    interview["required_tracks"]["scope"]["status"] = "open"
+    interview["closure"]["summary"] = ""
+    interview["closure_audit"] = default_closure_audit()
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
+    followup = review_followup_question(review_results)
+    interview = load_yaml(plan_dir / "interview.yaml")
+    interview["required_tracks"][followup["track"]]["status"] = "open"
+    write_yaml(plan_dir / "interview.yaml", interview)
     pending = create_pending_question(
         plan_dir,
         load_yaml(plan_dir / "interview.yaml"),
         "user_decision",
-        "scope",
-        "Pre-draft review still found unresolved plan decisions. What should the executor do differently?",
+        followup["track"],
+        followup["question"],
+        enforce_focus=False,
     )
     return {"review_results": review_results, "root_action": ask_user_action(pending)}
 
@@ -3743,7 +4230,7 @@ def approve_and_finalize(plan_dir, comment):
         comment or "Draft approved.",
         "Draft approval comment.",
         ["draft.md", "status.yaml#phase"],
-        "co flow respond",
+        f"{CLI_COMMAND_NAME} flow respond",
     )
     plan = load_yaml(plan_dir / "plan.yaml")
     tasks = load_yaml(plan_dir / "tasks.yaml")
@@ -3824,7 +4311,7 @@ def apply_draft_feedback(plan_dir, feedback):
             classification.get("summary") or feedback,
             "User requested wording-only draft feedback.",
             ["draft.md"],
-            "co flow respond",
+            f"{CLI_COMMAND_NAME} flow respond",
         )
         result = author_and_review_until_boundary(plan_dir, feedback=feedback)
         result["feedback"] = classification
@@ -4028,7 +4515,7 @@ def record_current_evidence(step_id, command, exit_code, success):
             f"Verification failed for {current_id}/{step_id}.",
             f"Command exited {exit_code}: {command}",
             [f"task:{current_id}", "evidence.yaml", str(artifact)],
-            "co flow evidence",
+            f"{CLI_COMMAND_NAME} flow evidence",
         )
     append_flow_log(
         bundle["plan_dir"],
@@ -4122,20 +4609,20 @@ def status_flow_boundary():
     phase = bundle["status"].get("phase")
     if phase == "drafting":
         pending = bundle["interview"].get("pending_user_question")
-        action = ask_user_action(pending) if pending else continue_flow_action("Run `co flow next` to continue planning.")
+        action = ask_user_action(pending) if pending else continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to continue planning.")
     elif phase == "draft_review":
         action = present_draft_action(bundle["plan_dir"])
     elif phase in {"planning", "ready_for_exec"}:
-        action = continue_flow_action("Run `co flow next` to continue mechanical transitions.")
+        action = continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to continue mechanical transitions.")
     elif phase == "executing":
         current_id = bundle["status"].get("current_task")
-        action = task_root_action(bundle, "execute_task") if current_id else continue_flow_action("Run `co flow next` to claim or finish.")
+        action = task_root_action(bundle, "execute_task") if current_id else continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to claim or finish.")
     elif phase == "halted":
         action = report_halt_action(bundle)
     elif phase == "complete":
         action = report_complete_action(bundle)
     else:
-        action = continue_flow_action("Run `co flow next` after fixing the current phase.")
+        action = continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` after fixing the current phase.")
     return {"root_action": action}
 
 
@@ -4149,7 +4636,10 @@ def print_flow_boundary(result):
 
 
 def flow_init(args):
-    plan_dir = init_plan(args.plan_id, args.title, args.replace)
+    initial_context = args.prompt if args.prompt is not None else read_stdin().strip()
+    if not initial_context:
+        raise ExError("flow init requires a non-empty --prompt or --stdin body")
+    plan_dir = init_plan(args.plan_id, args.title, args.replace, initial_context)
     log_flow_command_start(
         plan_dir,
         CURRENT_FLOW_COMMAND or "flow init",
@@ -4158,7 +4648,7 @@ def flow_init(args):
     )
     print_flow_result(
         {"phase": "drafting"},
-        continue_flow_action("Run `co flow next` to continue planning."),
+        continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to continue planning."),
         mode="planner",
     )
 
@@ -4194,12 +4684,18 @@ def flow_respond(args):
     pending = interview.get("pending_user_question")
     if pending is None:
         raise ExError("no pending user question or draft review is waiting for response")
+    recorded_response = response
+    if pending.get("skip_eligible") and is_deferred_answer(response):
+        recorded_response = (
+            f"Intentional deferral ({pending.get('skip_kind') or 'defer'}): "
+            "the user chose to defer this question."
+        )
     record_interview_round(
         plan_dir,
         route=pending["route"],
         track=pending["track"],
         question=pending["question"],
-        answer=response,
+        answer=recorded_response,
         source="from-user:co-flow-respond",
     )
     result = advance_flow_until_boundary()
@@ -4246,7 +4742,7 @@ def flow_repair(args):
         f"Repaired {current_id} field {args.field}.",
         args.reason,
         [f"task:{current_id}", f"tasks.yaml#{current_id}.{args.field}"],
-        "co flow repair",
+        f"{CLI_COMMAND_NAME} flow repair",
     )
     operation = "set" if args.set_value is not None else "add" if args.add_value is not None else "remove"
     append_flow_log(
@@ -4288,7 +4784,7 @@ def flow_halt(args):
         f"Execution halted: {args.reason}",
         args.kind,
         [item for item in [f"task:{current_id}" if current_id else None, "status.yaml#halt"] if item],
-        "co flow halt",
+        f"{CLI_COMMAND_NAME} flow halt",
     )
     append_flow_log(
         bundle["plan_dir"],
@@ -4302,7 +4798,7 @@ def flow_halt(args):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(prog="co")
+    parser = argparse.ArgumentParser(prog=CLI_COMMAND_NAME)
     sub = parser.add_subparsers(dest="command", required=True)
 
     current = sub.add_parser("current")
@@ -4316,6 +4812,7 @@ def build_parser():
             "draft",
             "plan",
             "tasks",
+            "plan-seed",
             "planning-context",
             "interview",
             "status",
@@ -4337,6 +4834,9 @@ def build_parser():
     flow_init_parser = flow_sub.add_parser("init")
     flow_init_parser.add_argument("--plan-id", required=True)
     flow_init_parser.add_argument("--title", required=True)
+    init_input = flow_init_parser.add_mutually_exclusive_group(required=True)
+    init_input.add_argument("--prompt")
+    init_input.add_argument("--stdin", action="store_true")
     flow_init_parser.add_argument("--replace", action="store_true")
     flow_init_parser.set_defaults(func=flow_init)
 
@@ -4405,7 +4905,7 @@ def main(argv=None):
             return 1
         sys.stdout.write("error: " + repr(str(exc)) + "\n")
         sys.stdout.write(
-            "required_action: 'Read error, satisfy the blocked gate or fix command input, then rerun the appropriate co command.'\n"
+            f"required_action: 'Read error, satisfy the blocked gate or fix command input, then rerun the appropriate {CLI_COMMAND_NAME} command.'\n"
         )
         return 1
     return 0

@@ -1,6 +1,6 @@
 # Example Plan Bundle
 
-Use this only for density calibration. Create real bundles with `co flow init`.
+Use this only for density calibration. Create real bundles with `co.py flow init`.
 
 ## Directory
 
@@ -9,6 +9,8 @@ Use this only for density calibration. Create real bundles with `co flow init`.
   exec.yaml
   add-health-endpoint/
     draft.md
+    request.yaml
+    plan_seed.yaml
     plan.yaml
     tasks.yaml
     interview.yaml
@@ -52,6 +54,52 @@ Add a lightweight unauthenticated readiness endpoint.
 |---|---|
 | Focused route test | HTTP 200 with body `OK`. |
 | Final verification | Focused and broad checks pass. |
+```
+
+## `request.yaml`
+
+```yaml
+prompt: Add a lightweight unauthenticated readiness endpoint.
+captured_at: "2026-04-25T00:00:00Z"
+source: flow.init
+```
+
+## `plan_seed.yaml`
+
+```yaml
+status: ready
+generated_at: "2026-04-25T00:00:00Z"
+round_count: 5
+ambiguity_score_id: S2
+closure_audit:
+  id: A1
+  status: passed
+  score_id: S2
+  round_count: 5
+seed:
+  title: Add health endpoint
+  goal: Ship a deployment-readiness endpoint with focused and final verification.
+  context:
+    - src/http/mod.rs owns route registration.
+  non_goals:
+    - Auth redesign.
+    - Deployment changes.
+  constraints:
+    - Keep the response body exactly OK.
+  success_criteria:
+    - GET /health returns HTTP 200 with body OK.
+  verification_expectations:
+    - Run focused route verification and final broader HTTP verification.
+  execution_boundaries:
+    - The executor changes route handling and tests only.
+  source_round_ids:
+    - Q1
+    - Q2
+    - Q3
+    - Q4
+    - Q5
+  deferred_items: []
+  summary: The bundle should add a public OK health endpoint and prove it with focused and final verification.
 ```
 
 ## `plan.yaml`
@@ -148,6 +196,7 @@ tasks:
 
 ```yaml
 status: closed
+initial_context: Add a lightweight unauthenticated readiness endpoint.
 non_user_answer_streak: 0
 required_tracks:
   scope:
@@ -172,51 +221,49 @@ rounds:
   - id: Q1
     route: user_decision
     track: scope
-    question: Should the health endpoint include auth or stay public?
+    question: Is the health endpoint meant to be public infrastructure readiness, or part of an authenticated API surface?
     answer: Keep it public and lightweight.
     source: from-user
   - id: Q2
-    route: user_decision
+    route: code_plus_decision
     track: verification
-    question: Is a focused route test enough, or should final verification also run the broader suite?
+    question: Given the existing HTTP test surface, should final verification include the broader HTTP integration suite after the focused route test?
     answer: Run focused verification first and include broad final verification.
     source: from-user
   - id: Q3
     route: user_decision
-    track: outputs
-    question: Should the output be only the executable bundle, or include implementation changes too?
-    answer: Produce only the executable plan bundle.
+    track: non_goals
+    question: Should this include auth redesign, deployment config, or monitoring changes?
+    answer: No, exclude auth redesign, deployment changes, and broader monitoring work.
     source: from-user
   - id: Q4
-    route: user_decision
-    track: non_goals
-    question: Should auth or deployment configuration be part of this plan?
-    answer: No, exclude auth redesign and deployment changes.
-    source: from-user
-  - id: Q5
     route: code_plus_decision
     track: constraints
     question: Given the existing route style, should the response body stay exactly OK?
     answer: Yes, keep the response body exactly OK.
     source: from-user
-  - id: Q6
+  - id: Q5
     route: user_decision
     track: stop_conditions
     question: When should execution halt instead of repairing locally?
     answer: Halt only for a user decision or external environment issue.
     source: from-user
-  - id: Q7
-    route: code_plus_decision
-    track: verification
-    question: Which broader suite should final verification run?
-    answer: Run the broader HTTP integration suite after the focused health check.
-    source: from-user
-    purpose: hidden_assumption_followup
 pending_user_question: null
+deferred_items: []
 agent_runs: []
+ambiguity_ledger:
+  - id: S1
+    ambiguity: 0.19
+    ready: true
+    round_count: 4
+  - id: S2
+    ambiguity: 0.16
+    ready: true
+    round_count: 5
+completion_candidate_streak: 2
 ambiguity:
   latest:
-    id: S1
+    id: S2
     project_mode: brownfield
     threshold: 0.2
     weighted_clarity: 0.84
@@ -246,11 +293,19 @@ ambiguity:
       track: verification
       question: Which broader suite should final verification run?
     summary: Requirements are clear enough for bundle generation.
-    round_count: 7
+    round_count: 5
     scoring_temperature_intent: 0.1
     model: gpt-5.5
     reasoning_effort: medium
   history: []
+closure_audit:
+  id: A1
+  status: passed
+  score_id: S2
+  round_count: 5
+  question: null
+  blockers: []
+  summary: All execution-changing decisions are closed.
 closure:
   ready: true
   summary: All execution-changing decisions are closed.
@@ -305,11 +360,11 @@ entries:
   - id: N1
     kind: decision
     text: contract_reviewer PASS: scope and acceptance criteria are aligned.
-    why: Codex CLI pre-draft plan review.
+    why: Codex CLI bundle review.
     affects:
       - plan.yaml
       - tasks.yaml
-    source: co flow next
+    source: co.py flow next
 ```
 
 ## `evidence.yaml`

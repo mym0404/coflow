@@ -38,7 +38,7 @@ Ouroboros README and model-context references:
 
 ## Interview Skill Prompt
 
-Ouroboros' `interview` skill is a useful reference for root-agent routing, but coflow intentionally moves more control into `co`.
+Ouroboros' `interview` skill is a useful reference for root-agent routing, but coflow intentionally moves more control into `co.py`.
 
 Important source locations:
 
@@ -59,8 +59,8 @@ Important source locations:
 - `/Users/mj/projects/ouroboros/skills/interview/SKILL.md:218`: Seed-ready acceptance guard.
 - `/Users/mj/projects/ouroboros/skills/interview/SKILL.md:240`: dialectic rhythm guard.
 
-coflow already mirrors part of this with `code_fact`, `user_decision`, `code_plus_decision`, and `research_confirmation` routes in `skills/coplan/scripts/co`.
-When strengthening coplan, make those routes more mechanical inside `co` rather than relying on root-agent memory.
+coflow mirrors part of this with `code_fact`, `user_decision`, `code_plus_decision`, and `research_confirmation` routes in `skills/coplan/scripts/co.py`.
+When strengthening coplan, make those routes more mechanical inside `co.py` rather than relying on root-agent memory.
 
 ## Planning Code
 
@@ -102,12 +102,12 @@ Ouroboros interview and seed generation code:
 
 Use this mapping when comparing designs:
 
-- Ouroboros `InterviewEngine` maps to coflow internal interview handling behind `co flow next/respond`.
+- Ouroboros `InterviewEngine` maps to coflow internal interview handling behind `co.py flow next/respond`.
 - Ouroboros ambiguity threshold maps to coflow `AMBIGUITY_THRESHOLD`.
 - Ouroboros clarity floors map to coflow `AMBIGUITY_FLOORS`.
-- Ouroboros Seed maps conceptually to coflow finalized `draft.md`, `plan.yaml`, and `tasks.yaml`.
+- Ouroboros Seed maps conceptually to coflow `plan_seed.yaml`, which then authors finalized `draft.md`, `plan.yaml`, and `tasks.yaml`.
 - Ouroboros Seed immutability maps to coflow's post-finalize executor contract.
 - Ouroboros root skill routing maps to coflow root-agent stdout loop, but coflow should make the CLI own more decisions.
 
 Do not assume coflow needs the full Ouroboros MCP question-generator shape.
-For coflow, the high-value invariant is mechanical control through `co` stdout and bundle validation.
+For coflow, the high-value invariant is mechanical control through `co.py` stdout and bundle validation.

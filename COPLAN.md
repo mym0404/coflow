@@ -1,7 +1,7 @@
 # Coplan 흐름도
 
 이 문서는 `coplan`이 사용자 요청을 실행 가능한 plan bundle로 바꾸는 흐름을 보여주는 사용자용 문서다.
-그래프의 초점은 user, root agent, `co flow`, Codex CLI agent 사이에서 제어가 이동하는 방식이다.
+그래프의 초점은 user, root agent, `co.py flow`, Codex CLI agent 사이에서 제어가 이동하는 방식이다.
 
 ## Sequence Diagram
 
@@ -9,35 +9,45 @@
 sequenceDiagram
   participant User as user
   participant Root as root agent
-  participant Co as co flow
+  participant Co as co.py flow
   participant Agent as Codex CLI agent
 
   User->>Root: [유저] planning 요청
-  Root->>Co: [추론기계] co flow init --plan-id ... --title ...
-  Co->>Co: [기계] exec.yaml과 초기 bundle file 생성
+  Root->>Co: [추론기계] co.py flow init --plan-id ... --title ... --stdin
+  Co->>Co: [기계] exec.yaml, request.yaml, 초기 bundle file 생성
   Co-->>Root: [기계] root_action=continue_flow
 
   loop root boundary에 도달할 때까지
-    Root->>Co: [추론기계] co flow next or co flow respond --stdin
+    Root->>Co: [추론기계] co.py flow next or co.py flow respond --stdin
     Co->>Co: [기계] interview, status, context 읽기
     alt 사용자 답변이 필요함
       Co-->>Root: [기계] root_action=ask_user
       Root->>User: [추론기계] root_action.question 전달
       User-->>Root: [유저] 답변
-      Root->>Co: [추론기계] co flow respond --stdin
+      Root->>Co: [추론기계] co.py flow respond --stdin
       Co->>Co: [기계] 답변 기록과 pending question 해제
     else 내부 진행 가능
       Co->>Agent: [기계] ask-next or ambiguity scorer
       Agent-->>Co: [추론형식] schema-bound JSON
-      Co->>Co: [기계] fact 기록, ambiguity 계산, 숨은 가정 follow-up gate 처리
+      Co->>Co: [기계] fact 기록, ambiguity 계산, readiness streak 처리
     end
+  end
+
+  Co->>Agent: [기계] closure_auditor
+  Agent-->>Co: [추론형식] pass or ask_user JSON
+  alt closure audit 질문 필요
+    Co-->>Root: [기계] root_action=ask_user
+  else closure audit 통과
+    Co->>Agent: [기계] seed_architect
+    Agent-->>Co: [추론형식] plan_seed.yaml JSON
+    Co->>Co: [기계] plan_seed.yaml 작성과 interview close
   end
 
   Co->>Agent: [기계] bundle_author
   Agent-->>Co: [추론형식] draft.md, plan.yaml, tasks.yaml JSON
   Co->>Co: [기계] bundle file 작성과 검증
 
-  loop pre-draft review가 통과할 때까지
+  loop bundle review가 통과할 때까지
     par contract review
       Co->>Agent: [기계] contract_reviewer
       Agent-->>Co: [추론형식] PASS or FAIL JSON
@@ -56,7 +66,7 @@ sequenceDiagram
 
   Root->>User: [추론기계] root_action.draft 표시
   User-->>Root: [유저] 승인 또는 feedback
-  Root->>Co: [추론기계] co flow respond --stdin
+  Root->>Co: [추론기계] co.py flow respond --stdin
   Co->>Agent: [기계] 필요한 경우 draft feedback 분류
   Agent-->>Co: [추론형식] approval, wording_change, or meaning_change JSON
   alt approval
@@ -77,13 +87,15 @@ sequenceDiagram
 ```mermaid
 flowchart TD
   Start(["[유저] planning 요청"])
-  Init["[추론기계] co flow init"]
-  Iterate["[기계] interview와 숨은 가정 gate 진행"]
+  Init["[추론기계] co.py flow init"]
+  Iterate["[기계] Socratic interview와 ambiguity gate 진행"]
   Boundary{"[기계] root boundary?"}
   Question["[추론기계] 질문 전달"]
   Answer["[유저] 답변 또는 수정"]
+  Audit["[추론형식] closure audit"]
+  Seed["[추론형식] plan seed 생성"]
   Draft["[추론형식] plan draft 생성"]
-  Review["[기계] 구조 검증과 review gate"]
+  Review["[기계] bundle review gate"]
   DraftReady{"[기계] draft 표시 가능?"}
   Repair["[추론형식] finding 반영"]
   Present["[추론기계] draft 표시"]
@@ -99,7 +111,9 @@ flowchart TD
   Boundary -->|ask_user| Question
   Question --> Answer
   Answer --> Iterate
-  Boundary -->|draft possible| Draft
+  Boundary -->|seed ready| Audit
+  Audit --> Seed
+  Seed --> Draft
   Draft --> Review
   Review --> DraftReady
   DraftReady -->|no| Repair
@@ -114,15 +128,15 @@ flowchart TD
   Finalize --> Handoff
 
   linkStyle default stroke:#616161,stroke-width:1.5px
-  linkStyle 0,4,12,13,14,15,16 stroke:#2e7d32,stroke-width:2px
-  linkStyle 1,3,10,11,17 stroke:#1565c0,stroke-width:2px
-  linkStyle 2,5,6,9 stroke:#f9a825,stroke-width:2px
+  linkStyle 0,4,14,15,16,17,18 stroke:#2e7d32,stroke-width:2px
+  linkStyle 1,3,12,13,19 stroke:#1565c0,stroke-width:2px
+  linkStyle 2,5,6,7,11 stroke:#f9a825,stroke-width:2px
 ```
 
 ## Label Meaning
 
 - `[기계]`: file read/write, schema validation, state transition, subprocess launch, stdout emission처럼 코드로 실행되는 단계.
-- `[추론기계]`: root agent가 `co flow`를 호출하거나 `root_action`의 사용자 표시 내용을 전달하는 단계.
+- `[추론기계]`: root agent가 `co.py flow`를 호출하거나 `root_action`의 사용자 표시 내용을 전달하는 단계.
 - `[유저]`: 사용자가 작성한 요청, 답변, feedback, approval.
 - `[추론형식]`: JSON schema 같은 정해진 출력 형식 안에서 이뤄지는 AI 판단.
 - Flowchart edge 색상은 같은 역할을 따른다. green은 `[유저]`, blue는 `[추론기계]`, gray는 `[기계]`, yellow는 `[추론형식]`이다.
