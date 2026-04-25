@@ -111,7 +111,7 @@ Important source locations:
 ## Orchestrator And Codex Runtime
 
 Ouroboros has a richer runtime abstraction than coflow.
-coflow should only borrow the parts that can be expressed as `co.py` state transitions, stdout contracts, and evidence gates.
+coflow should only borrow the parts that can be expressed as `co.py` state transitions, stdout contracts, and verification gates.
 
 Important source locations:
 
@@ -140,10 +140,10 @@ Important source locations:
 
 Use this mapping when comparing designs:
 
-- Ouroboros Seed execution maps to coflow `co.py flow next`, `co.py flow evidence`, `co.py flow repair`, and `co.py flow halt`.
+- Ouroboros Seed execution maps to coflow `co.py flow next`, `co.py flow evidence`, `co.py flow task-done`, `co.py flow repair`, and `co.py flow halt`.
 - Ouroboros parallel AC execution maps conceptually to `tasks.yaml.depends_on`, but coflow currently executes one `Doing` task at a time.
 - Ouroboros subagent isolation maps conceptually to Codex CLI subagents used by `co.py` during planning review and scoring, not to arbitrary executor delegation.
-- Ouroboros post-execution QA maps conceptually to coflow final verification tasks and required evidence records.
+- Ouroboros post-execution QA maps conceptually to coflow final verification tasks with required mechanical and semantic verification records.
 - Ouroboros event sourcing maps only loosely to coflow `status.yaml`, `evidence.yaml`, and `notes.yaml`; coflow does not maintain an executor event log or SQLite replay model.
 
 Do not import Ouroboros parallelism into coflow by default.

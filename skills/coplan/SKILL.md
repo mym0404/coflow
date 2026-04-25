@@ -20,6 +20,8 @@ description: 사용자 요청을 `co.py flow`로 실행 가능한 plan bundle로
 - 사용자에게 보여줄 계획 계약은 `root_action.plan_seed` 그대로 보여준다.
 - 사용자 요청, 답변, approval, feedback은 요약·번역·정리하지 않는다.
 - 사용자 답변, approval, feedback은 `co.py flow respond --stdin`으로 전달한다.
+- 생성되는 `tasks.yaml`의 verification은 mechanical command checks와 semantic root-agent self-review checks로 구성된다.
+- Planning skill은 verification을 실행하거나 evidence를 기록하지 않는다. 실행과 검증 기록은 `coexec`가 맡는다.
 - Bundle file은 CLI가 쓰는 실행 상태다. Root agent가 직접 수정하지 않는다.
 - `co.py` 의 모든 커맨드들은 내부 CLI의 처리 과정으로 인해 10분 이상 충분히 길어질 수 있으므로 커맨드를 임의로 중지하거나 재시도하지 않고, 새 root boundary나 실패가 나오기 전까지 반복 진행 보고 없이 기다린다.
 

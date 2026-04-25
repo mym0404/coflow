@@ -14,7 +14,7 @@ def schema():
         },
         "required": ["files_read", "commands_considered", "grounding_summary"],
     }
-    verification_step = {
+    mechanical_check = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
@@ -24,14 +24,16 @@ def schema():
         },
         "required": ["id", "command", "success_signal"],
     }
-    expected_evidence = {
+    semantic_check = {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "step_id": {"type": "string"},
-            "file": {"type": "string", "pattern": "^evidence/[^/].+"},
+            "id": {"type": "string"},
+            "lens": {"type": "string"},
+            "review_prompt": {"type": "string"},
+            "pass_signal": {"type": "string"},
         },
-        "required": ["step_id", "file"],
+        "required": ["id", "lens", "review_prompt", "pass_signal"],
     }
     task = {
         "type": "object",
@@ -64,13 +66,12 @@ def schema():
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
-                    "evidence_required": {"type": "boolean"},
-                    "steps": {"type": "array", "items": verification_step},
+                    "mechanical": {"type": "array", "minItems": 1, "items": mechanical_check},
+                    "semantic": {"type": "array", "minItems": 1, "items": semantic_check},
                 },
-                "required": ["evidence_required", "steps"],
+                "required": ["mechanical", "semantic"],
             },
             "acceptance_criteria": string_array,
-            "expected_evidence": {"type": "array", "items": expected_evidence},
             "reopen_when": string_array,
         },
         "required": [
@@ -86,7 +87,6 @@ def schema():
             "implementation_notes",
             "verification",
             "acceptance_criteria",
-            "expected_evidence",
             "reopen_when",
         ],
     }
@@ -116,8 +116,9 @@ def prompt(*, context, feedback=None):
         "Use plan_seed.yaml as the source of truth. Inspect the repository only to ground implementation boundaries and commands. Do not edit files directly. Do not leave TBD placeholders.\n"
         "Return repo_inspection with the repo files you read, commands you considered, and a concise grounding_summary. Do not include execution evidence artifacts there.\n"
         "Do not expand, narrow, or reinterpret the seed. Project goal, constraints, non-goals, success criteria, execution boundaries, and verification expectations must be projected into task context, must_do, must_not_do, acceptance_criteria, and verification.\n"
-        "Every task must satisfy the coflow task schema and include at least one final_verification task.\n"
-        "Every expected_evidence.file must be a relative artifact path under evidence/, such as evidence/t01-preflight.txt.\n"
+        "Every task must satisfy the coflow task schema and include at least one final_verification task. Every task verification must include mechanical command checks and semantic root-agent self-review checks.\n"
+        "Mechanical checks are local commands that should pass for the task, including repo-native always-on checks when relevant and focused task-specific checks. Semantic checks are self-review lenses with concrete review prompts and pass signals tied to the approved plan seed and current task acceptance criteria.\n"
+        "Final verification tasks must depend on every non-final task and must be full-scope: include broad repo-native mechanical verification using real validation commands such as test, lint, typecheck, build, compile, or repo-native check commands, plus semantic reviews covering plan seed fit, acceptance criteria, regression risk, and evidence interpretation.\n"
         "Keep execution decisions static so the executor does not need to plan.\n\n"
         f"Context:\n{context}"
         f"{extra}"

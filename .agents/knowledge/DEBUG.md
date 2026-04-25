@@ -93,8 +93,8 @@ High-value event families:
 | `seed_feedback.classified` | User plan-seed feedback was classified before mutation. |
 | `state.transition` | A saved YAML field changed. |
 | `task.claimed` | CLI selected the current task. |
-| `evidence.recorded` | Verification output was recorded through `flow evidence`. |
-| `task.completed` | CLI completed a task after required evidence passed. |
+| `evidence.recorded` | Mechanical or semantic verification was recorded through `flow evidence`. |
+| `task.completed` | CLI completed a task after `flow task-done` confirmed required verification records. |
 | `repair.applied` | CLI applied a contract-compatible repair. |
 | `halt.recorded` | CLI recorded a halt boundary. |
 | `execution.completed` | CLI completed the entire execution after finish gates passed. |
@@ -150,8 +150,8 @@ Likely problems:
 
 | Symptom | Debug Focus |
 |---|---|
-| Task will not complete | Missing expected evidence, failed evidence, wrong step id, artifact path outside `evidence/`. |
-| Same task repeats | Current task still `Doing`, evidence missing, `flow evidence` returned `execute_task` or `repair_task`. |
+| Task will not complete | Missing mechanical or semantic pass record, failed evidence, wrong check id, or missing `flow task-done`. |
+| Same task repeats | Current task still `Doing`, verification missing, `flow evidence` returned `execute_task` or `repair_task`, or `task-done` reported missing checks. |
 | Repair loops | Latest failed evidence, verification output, task scope mismatch, acceptance criteria conflict. |
 | No next task | Dependency state, `ready_tasks`, current task still set, finish gate not satisfied. |
 | Halt is unexpected | `status.yaml.halt`, `halt.recorded`, notes affecting the current task. |

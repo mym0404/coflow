@@ -17,8 +17,8 @@ A bundle is planner-ready only when:
 - `tasks.yaml` contains no status fields.
 - `tasks.yaml` has at least one `kind: final_verification` task.
 - all task dependencies point to known tasks and form an acyclic graph.
-- every task has structured verification steps and expected evidence.
-- every expected evidence path is a relative path under `evidence/`.
+- every task has mechanical verification checks and semantic self-review checks.
+- every final verification task depends on every non-final task and carries full-scope mechanical and semantic verification coverage.
 - `status.yaml` task ids match `tasks.yaml` task ids.
 - `status.yaml.bundle_inspection.author` records grounded bundle-author repo inspection.
 - `interview.yaml.seed_review.status` reaches `approved`.
@@ -61,24 +61,31 @@ The executor must:
 - Start each loop with `co.py flow next`.
 - Execute only the task returned by `root_action.task`.
 - Keep exactly one task in `Doing`.
-- Record verification artifacts through `co.py flow evidence`.
+- Record mechanical command results through `co.py flow evidence --kind mechanical`.
+- Record semantic root-agent self-review through `co.py flow evidence --kind semantic`.
+- Handle the `root_action` returned by every evidence command before running the next check.
+- Complete a task only through `co.py flow task-done --stdin`.
 - Repair only through `co.py flow repair`.
 - Halt only through `co.py flow halt`.
 - Finish only when `co.py flow next` returns `root_action.type: report_complete`.
 
 ## In-Contract Failure Gate
 
-- Verification failures, missing evidence, stale file scope, and in-contract repair needs keep the task in `Doing`.
+- Mechanical verification failure, semantic self-review failure, stale file scope, and in-contract repair needs keep the task in `Doing`.
+- Failed verification records return `root_action.type: repair_task`.
 - Use `co.py flow halt` only for `user_decision` or `external_environment`.
 - `halted` is not complete and cannot return `report_complete`.
 
-## Evidence Gate
+## Task-Done Gate
 
-A task with `verification.evidence_required: true` is done only when:
+A task is done only when:
 
-- each required `expected_evidence` entry has a matching successful `evidence.yaml` record
-- the artifact path points under the bundle `evidence/` directory
-- the recorded `task_id` and `step_id` match the task contract
+- each `verification.mechanical[*].id` has a matching successful `kind: mechanical` record
+- each `verification.semantic[*].id` has a matching `kind: semantic` record with `status: pass`
+- the task is currently `Doing`
+- `co.py flow task-done --stdin` receives a non-empty completion summary
+
+`co.py flow evidence` never transitions a task to `Done` by itself.
 
 ## Repair Gate
 
@@ -117,16 +124,17 @@ tasks:
     implementation_notes:
       - Assert HTTP 200 and body OK.
     verification:
-      evidence_required: true
-      steps:
+      mechanical:
         - id: focused-before
           command: cargo test health_route_returns_ok -- --exact
           success_signal: The test compiles and fails only because the route is missing.
+      semantic:
+        - id: acceptance-review
+          lens: Acceptance criteria
+          review_prompt: Review the new test against this task, the approved seed, and the route contract.
+          pass_signal: The test proves the intended route behavior without widening scope.
     acceptance_criteria:
       - The test asserts HTTP 200 and body OK.
-    expected_evidence:
-      - step_id: focused-before
-        file: evidence/t1-focused-before.txt
     reopen_when:
       - HTTP harness or endpoint contract changes.
 ```

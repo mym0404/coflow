@@ -98,7 +98,7 @@ Use `skills/coplan/SKILL.md` as the planner entrypoint.
 Core flow:
 
 - initialize with `skills/coplan/scripts/co.py flow init --plan-id <id> --title "<title>" --stdin`.
-- let `flow init`, `flow respond`, and `flow evidence` advance internally until the next root boundary.
+- let `flow init`, `flow respond`, `flow evidence`, and `flow task-done` advance internally until the next root boundary.
 - use `skills/coplan/scripts/co.py flow next` to resume an active bundle and ask the CLI for the next root boundary.
 - ask exact `root_action.question` values with the accompanying `root_action.options`, then pipe answers to `co.py flow respond --stdin`.
 - present exact `root_action.plan_seed` values and pipe approval or feedback to `co.py flow respond --stdin`.
@@ -115,7 +115,8 @@ Core flow:
 
 - start each loop with `skills/coplan/scripts/co.py flow next`.
 - implement only `root_action.task` when `root_action.type: execute_task`.
-- record verification output with `co.py flow evidence`.
+- record mechanical command output and semantic self-review with `co.py flow evidence`.
+- complete the current task only with `co.py flow task-done --stdin` after required verification records pass.
 - halt only through `co.py flow halt`.
 - report completion only after `root_action.type: report_complete`.
 - report CLI errors only through `root_action.type: report_error`.

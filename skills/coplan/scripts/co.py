@@ -81,6 +81,35 @@ INTERVIEW_CLOSURE_CHECKS = (
     "verification_proves_behavior",
     "no_material_questions",
 )
+EVIDENCE_KINDS = {"mechanical", "semantic"}
+SEMANTIC_REVIEW_STATUSES = {"pass", "fail"}
+FINAL_SEMANTIC_SCOPE_TERMS = (
+    ("plan", "seed", "계획"),
+    ("acceptance", "criteria", "완료", "수용"),
+    ("regression", "회귀"),
+    ("evidence", "증거", "검증 기록"),
+)
+FINAL_MECHANICAL_SCOPE_TERMS = (
+    "build",
+    "check",
+    "compile",
+    "compileall",
+    "eslint",
+    "go test",
+    "gradle",
+    "jest",
+    "just",
+    "lint",
+    "make",
+    "mypy",
+    "npm",
+    "pnpm",
+    "pytest",
+    "test",
+    "tsc",
+    "typecheck",
+    "yarn",
+)
 INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE = "hidden_assumption_followup"
 INTERVIEW_CLOSURE_AUDIT_PURPOSE = "closure_audit_followup"
 INTERVIEW_QUESTION_PURPOSES = {
@@ -1051,6 +1080,46 @@ def interview_focus_blocker(interview, next_track):
     )
 
 
+def focus_zoom_out_question(interview, blocked_track):
+    other_open_tracks = [
+        track
+        for track in interview_open_tracks(interview)
+        if track != blocked_track
+    ]
+    if not other_open_tracks:
+        return None
+    track = other_open_tracks[0]
+    prompts = {
+        "non_goals": "Before narrowing scope further, what should this plan explicitly avoid changing?",
+        "outputs": "Before narrowing scope further, what final output should this plan produce?",
+        "verification": "Before narrowing scope further, what proof should show the result is correct?",
+        "constraints": "Before narrowing scope further, what constraint should the plan respect?",
+        "stop_conditions": "Before narrowing scope further, when should execution stop instead of guessing?",
+        "scope": "Before narrowing another area further, what core change should stay in scope?",
+    }
+    return {
+        "route": "user_decision",
+        "track": track,
+        "question": prompts.get(track, "Before continuing, what boundary should this plan respect?"),
+        "options": question_options_for_kind(None),
+    }
+
+
+def create_focus_zoom_out_pending(plan_dir, interview, blocked_track):
+    fallback = focus_zoom_out_question(interview, blocked_track)
+    if fallback is None:
+        return None
+    return create_pending_question(
+        plan_dir,
+        interview,
+        fallback["route"],
+        fallback["track"],
+        fallback["question"],
+        enforce_focus=False,
+        options=fallback["options"],
+    )
+
+
 def interview_seed_ready(interview):
     validate_interview(interview)
     return (
@@ -1105,7 +1174,6 @@ def validate_tasks(data):
             "implementation_notes",
             "verification",
             "acceptance_criteria",
-            "expected_evidence",
             "reopen_when",
         ]
         require_fields(task, required, f"task {task.get('id', '<missing>')}")
@@ -1139,7 +1207,7 @@ def validate_tasks(data):
             raise ExError(f"task {task['id']} files.primary must be a list")
         if not isinstance(files["generated_incidental"], list):
             raise ExError(f"task {task['id']} files.generated_incidental must be a list")
-        for list_field in ["must_do", "must_not_do", "implementation_notes", "acceptance_criteria", "expected_evidence", "reopen_when"]:
+        for list_field in ["must_do", "must_not_do", "implementation_notes", "acceptance_criteria", "reopen_when"]:
             if not isinstance(task[list_field], list):
                 raise ExError(f"task {task['id']} {list_field} must be a list")
         for list_field in ["must_do", "acceptance_criteria"]:
@@ -1147,36 +1215,7 @@ def validate_tasks(data):
                 raise ExError(f"task {task['id']} {list_field} must not be empty")
             if any(not isinstance(item, str) or not item.strip() for item in task[list_field]):
                 raise ExError(f"task {task['id']} {list_field} items must be non-empty strings")
-        verification = task["verification"]
-        if not isinstance(verification, dict):
-            raise ExError(f"task {task['id']} verification must be a mapping")
-        require_fields(verification, ["evidence_required", "steps"], f"task {task['id']} verification")
-        if not isinstance(verification["evidence_required"], bool):
-            raise ExError(f"task {task['id']} verification.evidence_required must be true or false")
-        if not isinstance(verification["steps"], list):
-            raise ExError(f"task {task['id']} verification.steps must be a list")
-        if not verification["steps"]:
-            raise ExError(f"task {task['id']} verification.steps must not be empty")
-        if verification["evidence_required"] and not task["expected_evidence"]:
-            raise ExError(f"task {task['id']} expected_evidence must not be empty when evidence is required")
-        step_ids = set()
-        for step in verification["steps"]:
-            if not isinstance(step, dict):
-                raise ExError(f"task {task['id']} verification step must be a mapping")
-            require_fields(step, ["id", "command", "success_signal"], f"task {task['id']} verification step")
-            for step_field in ["id", "command", "success_signal"]:
-                if not isinstance(step[step_field], str) or not step[step_field].strip():
-                    raise ExError(f"task {task['id']} verification step {step_field} must be a non-empty string")
-            if step["id"] in step_ids:
-                raise ExError(f"task {task['id']} has duplicate step id: {step['id']}")
-            step_ids.add(step["id"])
-        for expected in task.get("expected_evidence", []):
-            if not isinstance(expected, dict):
-                raise ExError(f"task {task['id']} expected_evidence must contain mappings")
-            require_fields(expected, ["step_id", "file"], f"task {task['id']} expected_evidence")
-            if expected["step_id"] not in step_ids:
-                raise ExError(f"task {task['id']} expected_evidence references unknown step: {expected['step_id']}")
-            validate_expected_evidence_path(expected["file"], f"task {task['id']} expected_evidence")
+        validate_task_verification(task, task_items)
         for dep in task["depends_on"]:
             if dep == task["id"]:
                 raise ExError(f"task {task['id']} must not depend on itself")
@@ -1187,14 +1226,87 @@ def validate_tasks(data):
     validate_task_graph_acyclic(graph)
 
 
-def validate_expected_evidence_path(value, label):
-    if not isinstance(value, str):
-        raise ExError(f"{label} file must be a string")
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts:
-        raise ExError(f"{label} file must be a relative path under evidence/")
-    if not value.startswith("evidence/") or value == "evidence/":
-        raise ExError(f"{label} file must be under evidence/")
+def validate_task_verification(task, all_tasks):
+    verification = task.get("verification")
+    if not isinstance(verification, dict):
+        raise ExError(f"task {task['id']} verification must be a mapping")
+    require_fields(verification, ["mechanical", "semantic"], f"task {task['id']} verification")
+    validate_mechanical_checks(task, verification["mechanical"])
+    validate_semantic_checks(task, verification["semantic"])
+    if task["kind"] == "final_verification":
+        validate_final_verification_scope(task, all_tasks)
+
+
+def validate_mechanical_checks(task, checks):
+    if not isinstance(checks, list):
+        raise ExError(f"task {task['id']} verification.mechanical must be a list")
+    if not checks:
+        raise ExError(f"task {task['id']} verification.mechanical must not be empty")
+    seen = set()
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ExError(f"task {task['id']} mechanical check must be a mapping")
+        require_fields(check, ["id", "command", "success_signal"], f"task {task['id']} mechanical check")
+        for field in ["id", "command", "success_signal"]:
+            if not isinstance(check[field], str) or not check[field].strip():
+                raise ExError(f"task {task['id']} mechanical check {field} must be a non-empty string")
+        if check["id"] in seen:
+            raise ExError(f"task {task['id']} has duplicate mechanical check id: {check['id']}")
+        seen.add(check["id"])
+
+
+def validate_semantic_checks(task, checks):
+    if not isinstance(checks, list):
+        raise ExError(f"task {task['id']} verification.semantic must be a list")
+    if not checks:
+        raise ExError(f"task {task['id']} verification.semantic must not be empty")
+    seen = set()
+    for check in checks:
+        if not isinstance(check, dict):
+            raise ExError(f"task {task['id']} semantic check must be a mapping")
+        require_fields(check, ["id", "lens", "review_prompt", "pass_signal"], f"task {task['id']} semantic check")
+        for field in ["id", "lens", "review_prompt", "pass_signal"]:
+            if not isinstance(check[field], str) or not check[field].strip():
+                raise ExError(f"task {task['id']} semantic check {field} must be a non-empty string")
+        if check["id"] in seen:
+            raise ExError(f"task {task['id']} has duplicate semantic check id: {check['id']}")
+        seen.add(check["id"])
+
+
+def validate_final_verification_scope(task, all_tasks):
+    non_final_ids = {
+        item.get("id")
+        for item in all_tasks
+        if isinstance(item, dict) and item.get("kind") != "final_verification"
+    }
+    missing_deps = sorted(non_final_ids - set(task.get("depends_on", [])))
+    if missing_deps:
+        raise ExError(
+            f"final_verification task {task['id']} must depend on all non-final tasks: "
+            + ", ".join(missing_deps)
+        )
+    mechanical_text = " ".join(
+        " ".join(str(check.get(field, "")) for field in ["id", "command", "success_signal"])
+        for check in task.get("verification", {}).get("mechanical", [])
+    ).lower()
+    if not any(term in mechanical_text for term in FINAL_MECHANICAL_SCOPE_TERMS):
+        raise ExError(
+            f"final_verification task {task['id']} mechanical checks must include broad repo-native verification"
+        )
+    semantic_text = " ".join(
+        " ".join(str(check.get(field, "")) for field in ["id", "lens", "review_prompt", "pass_signal"])
+        for check in task.get("verification", {}).get("semantic", [])
+    ).lower()
+    missing_terms = [
+        "/".join(group)
+        for group in FINAL_SEMANTIC_SCOPE_TERMS
+        if not any(term.lower() in semantic_text for term in group)
+    ]
+    if missing_terms:
+        raise ExError(
+            f"final_verification task {task['id']} semantic review must cover full scope terms: "
+            + ", ".join(missing_terms)
+        )
 
 
 def bundle_validation_feedback(exc):
@@ -1610,31 +1722,62 @@ def find_task(bundle, task_id):
     return tasks[task_id]
 
 
-def task_step(task, step_id):
-    for step in task.get("verification", {}).get("steps", []):
-        if step.get("id") == step_id:
-            return step
-    raise ExError(f"task {task['id']} has no verification step: {step_id}")
-
-
-def expected_evidence_for_task(task):
-    return task.get("expected_evidence", [])
+def task_check(task, kind, check_id):
+    if kind not in EVIDENCE_KINDS:
+        raise ExError(f"unknown evidence kind: {kind}")
+    for check in task.get("verification", {}).get(kind, []):
+        if check.get("id") == check_id:
+            return check
+    raise ExError(f"task {task['id']} has no {kind} verification check: {check_id}")
 
 
 def recorded_evidence_for_task(bundle, task_id):
     return [record for record in evidence_records(bundle) if record.get("task_id") == task_id]
 
 
-def required_evidence_missing(bundle, task):
-    if not task.get("verification", {}).get("evidence_required", False):
-        return []
+def latest_evidence_failures_for_task(bundle, task_id):
+    records = recorded_evidence_for_task(bundle, task_id)
+    latest_ids = {}
+    for record in records:
+        key = (record.get("kind"), record.get("check_id"))
+        latest_ids[key] = record.get("id")
+    return [
+        record
+        for record in records
+        if latest_ids.get((record.get("kind"), record.get("check_id"))) == record.get("id")
+        and evidence_record_failed(record)
+    ]
+
+
+def evidence_record_passed(record):
+    kind = record.get("kind")
+    if kind == "mechanical":
+        return record.get("success") is True and record.get("status") == "pass"
+    if kind == "semantic":
+        return record.get("status") == "pass"
+    return False
+
+
+def evidence_record_failed(record):
+    kind = record.get("kind")
+    if kind == "mechanical":
+        return record.get("success") is False or record.get("status") == "fail"
+    if kind == "semantic":
+        return record.get("status") == "fail"
+    return False
+
+
+def required_verification_missing(bundle, task):
     records = recorded_evidence_for_task(bundle, task["id"])
-    recorded = {(record.get("step_id"), record.get("artifact")) for record in records if record.get("success") is True}
+    latest = {}
+    for record in records:
+        latest[(record.get("kind"), record.get("check_id"))] = record
     missing = []
-    for expected in expected_evidence_for_task(task):
-        key = (expected.get("step_id"), expected.get("file"))
-        if key not in recorded:
-            missing.append(expected.get("file"))
+    for kind in ("mechanical", "semantic"):
+        for check in task.get("verification", {}).get(kind, []):
+            key = (kind, check.get("id"))
+            if not evidence_record_passed(latest.get(key, {})):
+                missing.append(f"{kind}:{check.get('id')}")
     return missing
 
 
@@ -1816,7 +1959,10 @@ def create_pending_question(
     if enforce_focus:
         focus_blocker = interview_focus_blocker(interview, track)
         if focus_blocker:
-            raise ExError(focus_blocker)
+            pending = create_focus_zoom_out_pending(plan_dir, interview, track)
+            if pending is None:
+                raise ExError(focus_blocker)
+            return pending
     pending = {
         "id": next_id(interview.get("rounds", []), "Q"),
         "route": route,
@@ -1914,13 +2060,18 @@ def normalize_ambiguity_score(output, interview, requested_mode):
 
 def current_task_status(bundle, current_id):
     task = find_task(bundle, current_id)
+    records = recorded_evidence_for_task(bundle, current_id)
     return {
         "task": task,
         "summary": {
             "id": current_id,
             "title": task.get("title"),
             "status": task_status(bundle).get(current_id),
-            "next_required_action": f"Continue {current_id} until required evidence is recorded and completion gates pass.",
+            "next_required_action": (
+                f"Continue {current_id} until mechanical checks, semantic self-review, "
+                "and task-done completion gate pass."
+            ),
+            "missing_verification": required_verification_missing(bundle, task),
         },
         "view": {
             "files": task.get("files"),
@@ -1928,11 +2079,20 @@ def current_task_status(bundle, current_id):
             "acceptance_criteria": task.get("acceptance_criteria"),
         },
         "evidence_state": {
-            "required": [item.get("file") for item in expected_evidence_for_task(task)],
+            "required": {
+                "mechanical": [item.get("id") for item in task.get("verification", {}).get("mechanical", [])],
+                "semantic": [item.get("id") for item in task.get("verification", {}).get("semantic", [])],
+            },
             "recorded": [
-                record.get("artifact")
-                for record in recorded_evidence_for_task(bundle, current_id)
+                {
+                    "kind": record.get("kind"),
+                    "check_id": record.get("check_id"),
+                    "status": record.get("status"),
+                    "artifact": record.get("artifact"),
+                }
+                for record in records
             ],
+            "missing": required_verification_missing(bundle, task),
         },
     }
 
@@ -2096,11 +2256,7 @@ def task_root_action(bundle, action_type):
     if not current_id:
         raise ExError("no current task is claimed")
     task_state = current_task_status(bundle, current_id)
-    latest_failed = [
-        record
-        for record in recorded_evidence_for_task(bundle, current_id)
-        if record.get("success") is False
-    ]
+    latest_failed = latest_evidence_failures_for_task(bundle, current_id)
     action = {
         "type": action_type,
         "active_plan": active_plan_summary(bundle),
@@ -2109,6 +2265,7 @@ def task_root_action(bundle, action_type):
         "status": task_state["summary"],
         "task_view": task_state["view"],
         "evidence_state": task_state["evidence_state"],
+        "task_done_command": f"{CLI_COMMAND_NAME} flow task-done --stdin",
         "notes": exec_notes_view(bundle, current_id),
     }
     if latest_failed:
@@ -2542,6 +2699,11 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
                 )
                 return ask_user_action(pending)
             if output["action"] == "record_fact":
+                interview = load_yaml(plan_dir / "interview.yaml")
+                if interview_focus_blocker(interview, output["track"]):
+                    pending = create_focus_zoom_out_pending(plan_dir, interview, output["track"])
+                    if pending is not None:
+                        return ask_user_action(pending)
                 record_interview_round(
                     plan_dir,
                     route=output["route"],
@@ -2629,6 +2791,11 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
             )
             return ask_user_action(pending)
         if output["action"] == "record_fact":
+            interview = load_yaml(plan_dir / "interview.yaml")
+            if interview_focus_blocker(interview, output["track"]):
+                pending = create_focus_zoom_out_pending(plan_dir, interview, output["track"])
+                if pending is not None:
+                    return ask_user_action(pending)
             record_interview_round(
                 plan_dir,
                 route=output["route"],
@@ -2936,19 +3103,29 @@ def claim_task_internal(bundle, task_id):
     append_flow_log(bundle["plan_dir"], "task.claimed", task_id=task_id)
 
 
-def complete_task_internal(bundle, task_id):
+def complete_task_internal(bundle, task_id, summary):
     status = bundle["status"]
     task = find_task(bundle, task_id)
     if status.get("current_task") != task_id or task_status(bundle).get(task_id) != "Doing":
         raise ExError(f"task is not currently Doing: {task_id}")
-    missing = required_evidence_missing(bundle, task)
+    missing = required_verification_missing(bundle, task)
     if missing:
-        raise ExError("required evidence missing: " + ", ".join(missing))
+        raise ExError("required verification missing: " + ", ".join(missing))
+    if not str(summary).strip():
+        raise ExError("task completion summary must be non-empty")
     previous_current = status.get("current_task")
     previous_task_state = status["tasks"].get(task_id)
     status["tasks"][task_id] = "Done"
     status["current_task"] = None
     write_yaml(bundle["plan_dir"] / "status.yaml", status)
+    append_note(
+        bundle["plan_dir"],
+        "decision",
+        str(summary).strip(),
+        "Task completed after required mechanical and semantic verification records.",
+        [f"task:{task_id}", "evidence.yaml", "status.yaml#tasks"],
+        f"{CLI_COMMAND_NAME} flow task-done",
+    )
     append_flow_log(
         bundle["plan_dir"],
         "state.transition",
@@ -2967,7 +3144,12 @@ def complete_task_internal(bundle, task_id):
         current=None,
         reason="complete_task",
     )
-    append_flow_log(bundle["plan_dir"], "task.completed", task_id=task_id)
+    append_flow_log(
+        bundle["plan_dir"],
+        "task.completed",
+        task_id=task_id,
+        summary_hash=hash_text(summary),
+    )
 
 
 def finish_internal(bundle):
@@ -2994,50 +3176,89 @@ def finish_internal(bundle):
     append_flow_log(bundle["plan_dir"], "execution.completed")
 
 
-def evidence_name_for_step(task, step_id):
-    for expected in expected_evidence_for_task(task):
-        if expected.get("step_id") == step_id:
-            artifact = Path(expected["file"])
-            if len(artifact.parts) >= 2 and artifact.parts[0] == "evidence":
-                return str(Path(*artifact.parts[1:]))
-            return str(artifact)
-    return f"{task['id'].lower()}-{step_id}.txt"
+def evidence_component(value):
+    component = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value).strip()).strip("-")
+    return component or "item"
 
 
-def record_current_evidence(step_id, command, exit_code, success):
+def evidence_name_for_check(task_id, kind, check_id, record_id):
+    return (
+        f"{evidence_component(task_id).lower()}-"
+        f"{evidence_component(kind).lower()}-"
+        f"{evidence_component(check_id).lower()}-"
+        f"{evidence_component(record_id).lower()}.txt"
+    )
+
+
+def record_current_evidence(args):
     bundle = load_bundle()
     current_id = bundle["status"].get("current_task")
     if not current_id:
         raise ExError("evidence requires a current Doing task")
     task = find_task(bundle, current_id)
-    task_step(task, step_id)
+    kind = args.kind
+    check_id = args.check
+    task_check(task, kind, check_id)
     if task_status(bundle).get(current_id) != "Doing":
         raise ExError("evidence can be added only for a Doing task")
-    name = safe_evidence_name(evidence_name_for_step(task, step_id))
+    body = read_stdin()
+    evidence = bundle["evidence"]
+    records = evidence.setdefault("records", [])
+    record_id = next_id(records, "V")
+    name = safe_evidence_name(evidence_name_for_check(current_id, kind, check_id, record_id))
     artifact = Path("evidence") / name
     artifact_path = bundle["plan_dir"] / artifact
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(read_stdin(), encoding="utf-8")
-    evidence = bundle["evidence"]
-    records = evidence.setdefault("records", [])
+    if kind == "mechanical":
+        if args.evidence_command is None:
+            raise ExError("mechanical evidence requires --command")
+        if args.exit_code is None:
+            raise ExError("mechanical evidence requires --exit-code")
+        if args.success is None:
+            raise ExError("mechanical evidence requires --success")
+        success = normalize_bool(args.success)
+        if success and args.exit_code != 0:
+            raise ExError("mechanical evidence cannot be successful with a non-zero --exit-code")
+        status = "pass" if success else "fail"
+        command = args.evidence_command
+        exit_code = args.exit_code
+    else:
+        if args.review_status is None:
+            raise ExError("semantic evidence requires --status")
+        if not body.strip():
+            raise ExError("semantic evidence requires a non-empty review body on stdin")
+        status = args.review_status
+        success = status == "pass"
+        command = None
+        exit_code = None
+    artifact_path.write_text(body, encoding="utf-8")
     record = {
-        "id": next_id(records, "V"),
+        "id": record_id,
         "task_id": current_id,
-        "step_id": step_id,
-        "command": command,
-        "exit_code": exit_code,
+        "kind": kind,
+        "check_id": check_id,
+        "status": status,
         "success": normalize_bool(success),
         "artifact": str(artifact),
         "satisfies": [],
     }
+    if command is not None:
+        record["command"] = command
+    if exit_code is not None:
+        record["exit_code"] = exit_code
     records.append(record)
     write_yaml(bundle["plan_dir"] / "evidence.yaml", evidence)
-    if not record["success"]:
+    if evidence_record_failed(record):
+        detail = (
+            f"Command exited {exit_code}: {command}"
+            if kind == "mechanical"
+            else "Semantic self-review returned fail."
+        )
         append_note(
             bundle["plan_dir"],
             "risk",
-            f"Verification failed for {current_id}/{step_id}.",
-            f"Command exited {exit_code}: {command}",
+            f"Verification failed for {current_id}/{kind}:{check_id}.",
+            detail,
             [f"task:{current_id}", "evidence.yaml", str(artifact)],
             f"{CLI_COMMAND_NAME} flow evidence",
         )
@@ -3046,10 +3267,12 @@ def record_current_evidence(step_id, command, exit_code, success):
         "evidence.recorded",
         record_id=record["id"],
         task_id=current_id,
-        step_id=step_id,
-        command_hash=hash_text(command),
-        command_bytes=len(str(command).encode("utf-8")),
+        kind=kind,
+        check_id=check_id,
+        command_hash=hash_text(command) if command is not None else None,
+        command_bytes=len(str(command).encode("utf-8")) if command is not None else 0,
         exit_code=exit_code,
+        status=status,
         success=record["success"],
         artifact=str(artifact),
     )
@@ -3158,7 +3381,7 @@ def flow_status_diagnostic(bundle):
             else "Run the next command to let the CLI claim the next task or finish execution."
         )
         if current_id:
-            diagnostic["evidence_command"] = f"{CLI_COMMAND_NAME} flow evidence --stdin"
+            diagnostic["task_done_command"] = f"{CLI_COMMAND_NAME} flow task-done --stdin"
         else:
             diagnostic["next_command"] = f"{CLI_COMMAND_NAME} flow next"
     elif phase == "halted":
@@ -3278,17 +3501,38 @@ def flow_respond(args):
 def flow_evidence(args):
     if not args.stdin:
         raise ExError("flow evidence requires --stdin")
-    record = record_current_evidence(args.step, args.evidence_command, args.exit_code, args.success)
-    if not record["success"]:
+    record = record_current_evidence(args)
+    if evidence_record_failed(record):
         bundle = load_bundle()
         print_flow_boundary({"root_action": task_root_action(bundle, "repair_task")})
         return
     bundle = load_bundle()
+    print_flow_boundary({"root_action": task_root_action(bundle, "execute_task")})
+
+
+def flow_task_done(args):
+    if not args.stdin:
+        raise ExError("flow task-done requires --stdin")
+    summary = read_stdin().strip()
+    if not summary:
+        raise ExError("flow task-done requires a non-empty completion summary on stdin")
+    bundle = load_bundle()
     current_id = bundle["status"].get("current_task")
-    if current_id:
-        task = find_task(bundle, current_id)
-        if not required_evidence_missing(bundle, task):
-            complete_task_internal(bundle, current_id)
+    if not current_id:
+        raise ExError("task-done requires a current Doing task")
+    task = find_task(bundle, current_id)
+    missing = required_verification_missing(bundle, task)
+    if missing:
+        append_flow_log(
+            bundle["plan_dir"],
+            "task.completion_blocked",
+            task_id=current_id,
+            missing=missing,
+            summary_hash=hash_text(summary),
+        )
+        print_flow_boundary({"root_action": task_root_action(bundle, "execute_task")})
+        return
+    complete_task_internal(bundle, current_id, summary)
     result = advance_flow_until_boundary()
     print_flow_boundary(result)
 
@@ -3394,12 +3638,18 @@ def build_parser():
     flow_respond_parser.set_defaults(func=flow_respond)
 
     flow_evidence_parser = flow_sub.add_parser("evidence")
-    flow_evidence_parser.add_argument("--step", required=True)
-    flow_evidence_parser.add_argument("--command", dest="evidence_command", required=True)
-    flow_evidence_parser.add_argument("--exit-code", type=int, required=True)
-    flow_evidence_parser.add_argument("--success", choices=["true", "false"], required=True)
+    flow_evidence_parser.add_argument("--kind", choices=sorted(EVIDENCE_KINDS), required=True)
+    flow_evidence_parser.add_argument("--check", required=True)
+    flow_evidence_parser.add_argument("--command", dest="evidence_command")
+    flow_evidence_parser.add_argument("--exit-code", type=int)
+    flow_evidence_parser.add_argument("--success", choices=["true", "false"])
+    flow_evidence_parser.add_argument("--status", dest="review_status", choices=sorted(SEMANTIC_REVIEW_STATUSES))
     flow_evidence_parser.add_argument("--stdin", action="store_true")
     flow_evidence_parser.set_defaults(func=flow_evidence)
+
+    flow_task_done_parser = flow_sub.add_parser("task-done")
+    flow_task_done_parser.add_argument("--stdin", action="store_true")
+    flow_task_done_parser.set_defaults(func=flow_task_done)
 
     flow_repair_parser = flow_sub.add_parser("repair")
     flow_repair_parser.add_argument("--field", required=True)

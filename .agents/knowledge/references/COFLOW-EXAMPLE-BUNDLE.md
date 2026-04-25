@@ -87,16 +87,17 @@ tasks:
     implementation_notes:
       - Assert HTTP 200 and body OK.
     verification:
-      evidence_required: true
-      steps:
+      mechanical:
         - id: focused-before
           command: cargo test health_route_returns_ok -- --exact
           success_signal: The test compiles and fails only because the route is missing.
+      semantic:
+        - id: focused-test-review
+          lens: Acceptance criteria
+          review_prompt: Review the focused test against the approved seed and T1 acceptance criteria.
+          pass_signal: The test proves the intended health route contract without widening scope.
     acceptance_criteria:
       - The test asserts HTTP 200 and body OK.
-    expected_evidence:
-      - step_id: focused-before
-        file: evidence/t1-focused-before.txt
     reopen_when:
       - HTTP harness or endpoint contract changes.
 
@@ -118,16 +119,17 @@ tasks:
     implementation_notes:
       - Reopen the relevant task if final verification fails.
     verification:
-      evidence_required: true
-      steps:
+      mechanical:
         - id: focused-final
           command: cargo test health_route_returns_ok -- --exact
           success_signal: Exit code 0 and the named test reports ok.
+      semantic:
+        - id: full-plan-acceptance-regression-evidence
+          lens: Full plan seed, acceptance criteria, regression risk, and evidence interpretation
+          review_prompt: Review the final implementation against the approved plan seed, all acceptance criteria, regression risk, and recorded evidence.
+          pass_signal: The plan seed is satisfied, acceptance criteria pass, regression risk is bounded, and evidence supports completion.
     acceptance_criteria:
       - Focused verification passes.
-    expected_evidence:
-      - step_id: focused-final
-        file: evidence/fv1-focused-final.txt
     reopen_when:
       - Any final verification command fails.
 ```

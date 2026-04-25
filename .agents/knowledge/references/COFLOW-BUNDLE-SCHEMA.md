@@ -28,7 +28,9 @@ Mutation:
 co.py flow init --plan-id <id> --title "<title>" --stdin
 co.py flow next
 co.py flow respond --stdin
-co.py flow evidence --step <step-id> --command "<command>" --exit-code <code> --success true|false --stdin
+co.py flow evidence --kind mechanical --check <id> --command "<command>" --exit-code <code> --success true|false --stdin
+co.py flow evidence --kind semantic --check <id> --status pass|fail --stdin
+co.py flow task-done --stdin
 co.py flow repair --field <path> --reason "<reason>" --set|--add|--remove <yaml-value>
 co.py flow halt --kind user_decision|external_environment --reason "<reason>"
 ```
@@ -85,15 +87,16 @@ Required task fields:
 - `must_do`
 - `must_not_do`
 - `implementation_notes`
-- `verification.evidence_required`
-- `verification.steps`
+- `verification.mechanical`
+- `verification.semantic`
 - `acceptance_criteria`
-- `expected_evidence`
 - `reopen_when`
 
-Every verification step requires `id`, `command`, and `success_signal`.
-Every expected evidence item requires `step_id` and a relative `file` under `evidence/`.
+Every mechanical check requires `id`, `command`, and `success_signal`.
+Every semantic check requires `id`, `lens`, `review_prompt`, and `pass_signal`.
+Every task must have at least one mechanical check and at least one semantic check.
 At least one task must use `kind: final_verification`.
+Every final verification task must depend on every non-final task, include broad repo-native mechanical verification, and include semantic review coverage for plan seed fit, acceptance criteria, regression risk, and evidence interpretation.
 Task dependencies must point to known task ids and must not form a cycle.
 
 ## `interview.yaml`
@@ -174,10 +177,12 @@ Use `halt` only for `user_decision` or `external_environment`.
 
 ## `notes.yaml`
 
-`notes.yaml` is append-only semantic memory. It records decisions, risks, revisions, repairs, and halt notes.
+`notes.yaml` is append-only semantic memory. It records decisions, risks, revisions, repairs, task completion summaries, and halt notes.
 Task-related notes use `task:<task-id>` in `affects`.
 
 ## `evidence.yaml`
 
-`evidence.yaml` is the append-only evidence manifest owned by `co.py flow evidence`.
-Loose files under `evidence/` are not enough; a task is not complete until required artifacts are recorded in `evidence.yaml`.
+`evidence.yaml` is the append-only verification manifest owned by `co.py flow evidence`.
+Mechanical records store `kind: mechanical`, `check_id`, `status`, `success`, optional `command`, optional `exit_code`, and an artifact under `evidence/`.
+Semantic records store `kind: semantic`, `check_id`, `status`, `success`, and a self-review artifact under `evidence/`.
+Loose files under `evidence/` are not enough; a task is not complete until all required mechanical and semantic checks are recorded as pass and `co.py flow task-done` succeeds.
