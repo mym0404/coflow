@@ -27,8 +27,8 @@ A bundle is planner-ready only when:
 
 - `co planner init` creates `interview.yaml` with required tracks open.
 - The planner records every material question and answer through `co planner interview record`.
-- User-judgment answers require a matching pending question from `co planner interview ask` or `co planner interview ask-next --runner codex`.
-- `ask-next` may return `ask_user`, `record_fact`, or `ready_for_score`; `ready_for_score` means the root agent should run `co planner interview score --runner codex --mode auto`.
+- User-judgment answers require a matching pending question from `co planner interview ask` or `co planner interview ask-next`.
+- `ask-next` may return `ask_user`, `record_fact`, or `ready_for_score`; `ready_for_score` means the root agent should run `co planner interview score --mode auto`.
 - Route sources must match `from-code...`, `from-user...`, or `from-research...`.
 - Closure requires at least one round for every required track.
 - Closure requires user-judgment rounds on `scope`, `outputs`, and `verification`.
@@ -36,7 +36,7 @@ A bundle is planner-ready only when:
 - `user_decision` and `code_plus_decision` reset `non_user_answer_streak`.
 - Once `non_user_answer_streak` reaches 3, the next record must be `user_decision` or `code_plus_decision`.
 - Once one track has two consecutive rounds, the next record must use another open track.
-- `co planner interview score --runner codex` must produce a fresh score for the current round count.
+- `co planner interview score` must produce a fresh score for the current round count.
 - `ambiguity = 1 - sum(clarity_i * weight_i)` must be `<= 0.2`.
 - Clarity floors must pass: goal `0.75`, constraints `0.65`, success criteria `0.70`, brownfield context `0.60`.
 - `co planner interview close` fails until every closure check has passed.
@@ -46,8 +46,8 @@ A bundle is planner-ready only when:
 
 ## Pre-Draft Review Gate
 
-- Pre-draft review runs through `co planner review run --runner codex --stage pre-draft`.
-- `co planner review run --runner codex --stage pre-draft` runs `contract_reviewer` and `verification_reviewer` in parallel.
+- Pre-draft review runs through `co planner review run --stage pre-draft`.
+- `co planner review run --stage pre-draft` runs `contract_reviewer` and `verification_reviewer` in parallel.
 - Any future command that invokes multiple Codex CLI agents must use the same parallel execution rule.
 - `contract_reviewer` checks hidden decisions, scope drift, contradictions, task DAG assumptions, file scope, and acceptance criteria.
 - `verification_reviewer` checks commands, evidence, final verification, and success signals.

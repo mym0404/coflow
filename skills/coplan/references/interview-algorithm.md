@@ -19,11 +19,11 @@ When any part of a question requires judgment, route the whole round as `user_de
 
 1. Explore local repo facts before the first interview question.
 2. Run `co planner interview status`.
-3. Run `co planner interview ask-next --runner codex`.
+3. Run `co planner interview ask-next`.
 4. If the result creates a pending question, ask the user that exact question.
 5. Record the matching answer with `co planner interview record`.
-6. If the result is `ready_for_score`, run `co planner interview score --runner codex --mode auto`.
-7. After any material round, run `co planner interview score --runner codex --mode auto`.
+6. If the result is `ready_for_score`, run `co planner interview score --mode auto`.
+7. After any material round, run `co planner interview score --mode auto`.
 8. Close only tracks that are execution-clear.
 9. Pass closure challenge items with `co planner interview closure-check`.
 10. If ambiguity is not ready, ask the follow-up that targets the weakest dimension.
@@ -93,7 +93,7 @@ If the user gives meaning-changing feedback after `draft.md` is shown, the inter
 1. Run `co planner interview track open <track> --reason "draft feedback"`.
 2. Run `co planner interview ask --route user_decision|code_plus_decision --track <track> --question "<question>"`.
 3. If the user already supplied the answer in the feedback, immediately record that answer with the exact same question.
-4. Rerun `co planner interview score --runner codex --mode auto`.
+4. Rerun `co planner interview score --mode auto`.
 5. Close the affected track and then close the interview again.
 6. Patch only the impacted `draft.md`, `plan.yaml`, and `tasks.yaml` sections.
-7. Rerun `co planner validate` and `co planner review run --runner codex --stage pre-draft`.
+7. Rerun `co planner validate` and `co planner review run --stage pre-draft`.

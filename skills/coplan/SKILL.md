@@ -12,7 +12,7 @@ You are the planner. You do not implement code, execute tasks, or close work ite
 ## Core Principles
 
 - `CLI For State`: use `co` for every state transition, interview ledger update, event, note, evidence, validation, and review gate.
-- `Direct Bundle Drafting`: after `co planner generate-skeleton`, directly patch only `draft.md`, `plan.yaml`, and `tasks.yaml` with the smallest correct diff.
+- `Direct Bundle Drafting`: after `co planner generate-skeleton`, read `planning_context.yaml`, then directly patch only `draft.md`, `plan.yaml`, and `tasks.yaml` with the smallest correct diff.
 - `Ledger Files Are CLI-Owned`: never directly edit `interview.yaml`, `status.yaml`, `events.yaml`, `notes.yaml`, or `evidence.yaml`.
 - `Explore Before Asking`: discover repository facts first, then ask only about intent, tradeoffs, or missing decisions.
 - `Follow Co Output`: do not compute readiness or gate state yourself; call `co`, read stdout YAML, and follow `required_action` and `next_command`.
@@ -36,6 +36,7 @@ The active pointer and bundle layout are:
     draft.md
     plan.yaml
     tasks.yaml
+    planning_context.yaml
     interview.yaml
     status.yaml
     notes.yaml
@@ -56,7 +57,7 @@ Before writing bundle content, read [references/root-agent-co-guide.md](referenc
 - Parse every `co` stdout YAML response and follow `required_action`.
 - Run `next_command` when present and no user decision is needed.
 - Run a local repository sweep before any interview question.
-- Use `co planner interview ask-next --runner codex` to let `co` choose the next interview action.
+- Use `co planner interview ask-next` to let `co` choose the next interview action.
 - If stdout includes `pending_user_question`, ask that exact question and record the answer with `co planner interview record`.
 - If stdout reports a material gap that the root agent can see, use `co planner interview blocker add|clear --reason "..."`.
 - Attempt `co planner interview close --summary "..."` only when `required_action` indicates the interview is ready to close; if it fails, satisfy the returned error and `required_action`.
@@ -64,9 +65,11 @@ Before writing bundle content, read [references/root-agent-co-guide.md](referenc
 ### Phase 2: Skeleton, Direct Patch, Pre-Draft Review
 
 - Run `co planner generate-skeleton` after the interview closes.
+- `co planner generate-skeleton` internally builds `planning_context.yaml` and blocks skeleton generation if the planning context gate fails.
+- Read the `planning_context_file` reported by stdout before writing bundle content.
 - Directly patch only `draft.md`, `plan.yaml`, and `tasks.yaml` until the bundle is decision-complete.
 - Run `co planner validate` for structural validation before approval.
-- Run `co planner review run --runner codex --stage pre-draft`.
+- Run `co planner review run --stage pre-draft`.
 - Fix valid reviewer findings by directly patching the relevant bundle files, then rerun the failed review path.
 - Do not show `draft.md` to the user until pre-draft review passes.
 

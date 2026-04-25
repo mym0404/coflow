@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -32,7 +33,13 @@ REVIEW_STAGES = {"pre-draft"}
 REQUIRED_REVIEWERS = ("contract_reviewer", "verification_reviewer")
 INTERVIEW_STATUSES = {"open", "closed"}
 INTERVIEW_TRACK_STATUSES = {"open", "closed"}
-INTERVIEW_ROUTES = {"code_fact", "user_decision", "code_plus_decision", "research_confirmation"}
+INTERVIEW_ROUTE_ORDER = (
+    "code_fact",
+    "user_decision",
+    "code_plus_decision",
+    "research_confirmation",
+)
+INTERVIEW_ROUTES = set(INTERVIEW_ROUTE_ORDER)
 INTERVIEW_REQUIRED_TRACKS = (
     "scope",
     "non_goals",
@@ -85,6 +92,7 @@ AMBIGUITY_FLOORS = {
 }
 CODEX_AGENT_DEFAULT_MODEL = "gpt-5.5"
 CODEX_AGENT_DEFAULT_SANDBOX = "read-only"
+CODEX_AGENT_REASONING_EFFORT = "medium"
 CODEX_AGENT_DEFAULT_TIMEOUT_SECONDS = 600
 CODEX_AGENT_STRIP_ENV_KEYS = {
     "OUROBOROS_AGENT_RUNTIME",
@@ -130,6 +138,14 @@ DRAFT_APPROVED_PHASES = {
 
 class ExError(Exception):
     pass
+
+
+class GateError(ExError):
+    def __init__(self, message, data, required_action, next_command=None):
+        super().__init__(message)
+        self.data = data
+        self.required_action = required_action
+        self.next_command = next_command
 
 
 def require_yaml():
@@ -282,6 +298,8 @@ def build_codex_exec_command(
         "--json",
         "--skip-git-repo-check",
         "--ephemeral",
+        "-c",
+        f'reasoning_effort="{CODEX_AGENT_REASONING_EFFORT}"',
         "--sandbox",
         sandbox,
         "-C",
@@ -347,6 +365,7 @@ def run_codex_agent(role, prompt, schema, *, cwd=None):
             "role": role,
             "model": CODEX_AGENT_DEFAULT_MODEL,
             "sandbox": CODEX_AGENT_DEFAULT_SANDBOX,
+            "reasoning_effort": CODEX_AGENT_REASONING_EFFORT,
             "command": command,
             "output": output,
             "stdout_tail": process.stdout.strip().splitlines()[-20:],
@@ -420,6 +439,7 @@ def file_path(plan_dir, name):
         "draft": "draft.md",
         "plan": "plan.yaml",
         "tasks": "tasks.yaml",
+        "planning-context": "planning_context.yaml",
         "interview": "interview.yaml",
         "status": "status.yaml",
         "notes": "notes.yaml",
@@ -498,12 +518,14 @@ def append_note(plan_dir, kind, text, why, affects, source):
 
 def load_bundle():
     plan_id, plan_dir = active_plan()
+    planning_context_path = plan_dir / "planning_context.yaml"
     return {
         "plan_id": plan_id,
         "plan_dir": plan_dir,
         "draft": read_text_file(plan_dir / "draft.md"),
         "plan": load_yaml(plan_dir / "plan.yaml"),
         "tasks": load_yaml(plan_dir / "tasks.yaml"),
+        "planning_context": load_yaml(planning_context_path) if planning_context_path.exists() else None,
         "interview": load_yaml(plan_dir / "interview.yaml"),
         "status": load_yaml(plan_dir / "status.yaml"),
         "notes": load_yaml(plan_dir / "notes.yaml"),
@@ -948,6 +970,163 @@ def validate_task_graph_acyclic(graph):
         visit(task_id, [])
 
 
+def planning_context_fingerprint(interview):
+    payload = {
+        "required_tracks": interview.get("required_tracks"),
+        "rounds": interview.get("rounds"),
+        "ambiguity_latest": interview.get("ambiguity", {}).get("latest"),
+        "closure": interview.get("closure"),
+    }
+    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def planning_context_coverage(interview):
+    track_rounds, user_track_rounds = interview_round_tracks(interview)
+    missing_tracks = [
+        track for track in INTERVIEW_REQUIRED_TRACKS if track_rounds.get(track, 0) == 0
+    ]
+    missing_user_decision_tracks = [
+        track
+        for track in INTERVIEW_REQUIRED_USER_TRACKS
+        if user_track_rounds.get(track, 0) == 0
+    ]
+    verification_summary = (
+        interview.get("required_tracks", {}).get("verification", {}).get("summary", "")
+    )
+    return {
+        "track_rounds": track_rounds,
+        "user_decision_rounds": user_track_rounds,
+        "missing_tracks": missing_tracks,
+        "missing_user_decision_tracks": missing_user_decision_tracks,
+        "verification_ready": bool(str(verification_summary).strip()),
+    }
+
+
+def build_planning_context(plan_id, plan_dir, title, interview):
+    validate_interview(interview)
+    rounds = interview.get("rounds", [])
+    facts = {route: [] for route in INTERVIEW_ROUTE_ORDER}
+    track_context = {}
+    for track in INTERVIEW_REQUIRED_TRACKS:
+        track_rounds = [
+            {
+                "id": item.get("id"),
+                "route": item.get("route"),
+                "question": item.get("question"),
+                "answer": item.get("answer"),
+                "source": item.get("source"),
+            }
+            for item in rounds
+            if item.get("track") == track
+        ]
+        track_context[track] = {
+            "summary": interview.get("required_tracks", {}).get(track, {}).get("summary", ""),
+            "rounds": track_rounds,
+        }
+    for item in rounds:
+        route = item.get("route")
+        if route in facts:
+            facts[route].append(
+                {
+                    "id": item.get("id"),
+                    "track": item.get("track"),
+                    "question": item.get("question"),
+                    "answer": item.get("answer"),
+                    "source": item.get("source"),
+                }
+            )
+    latest = interview.get("ambiguity", {}).get("latest") or {}
+    coverage = planning_context_coverage(interview)
+    required_inputs = []
+    for track in INTERVIEW_REQUIRED_TRACKS:
+        summary = track_context[track]["summary"]
+        required_inputs.append(
+            {
+                "track": track,
+                "summary": summary,
+                "round_ids": [item["id"] for item in track_context[track]["rounds"]],
+            }
+        )
+    return {
+        "fingerprint": planning_context_fingerprint(interview),
+        "summary": {
+            "plan_id": plan_id,
+            "title": title,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "round_count": len(rounds),
+        },
+        "track_context": track_context,
+        "facts": facts,
+        "coverage": coverage,
+        "ambiguity": {
+            "ready": latest.get("ready") is True,
+            "threshold": latest.get("threshold", AMBIGUITY_THRESHOLD),
+            "ambiguity": latest.get("ambiguity"),
+            "weakest_dimension": latest.get("weakest_dimension", ""),
+            "floor_failures": latest.get("floor_failures", []),
+            "recommended_followup": latest.get("recommended_followup"),
+        },
+        "drafting_contract": {
+            "editable_files": ["draft.md", "plan.yaml", "tasks.yaml"],
+            "required_inputs": required_inputs,
+        },
+    }
+
+
+def planning_context_gate_failures(interview):
+    failures = []
+    if interview.get("status") != "closed":
+        failures.append("interview_not_closed")
+    if interview.get("pending_user_question") is not None:
+        failures.append("pending_user_question")
+    material_blockers = interview.get("closure", {}).get("material_blockers", [])
+    if material_blockers:
+        failures.append("material_blockers=" + ",".join(str(item) for item in material_blockers))
+    open_tracks = interview_open_tracks(interview)
+    if open_tracks:
+        failures.append("open_tracks=" + ",".join(open_tracks))
+    coverage = planning_context_coverage(interview)
+    if coverage["missing_tracks"]:
+        failures.append("missing_tracks=" + ",".join(coverage["missing_tracks"]))
+    if coverage["missing_user_decision_tracks"]:
+        failures.append(
+            "missing_user_decision_tracks="
+            + ",".join(coverage["missing_user_decision_tracks"])
+        )
+    failures.extend(interview_ambiguity_blockers(interview))
+    missing_checks = [
+        check
+        for check, state in interview.get("closure", {}).get("checks", {}).items()
+        if state.get("passed") is not True
+    ]
+    if missing_checks:
+        failures.append("missing_closure_checks=" + ",".join(missing_checks))
+    if not coverage["verification_ready"]:
+        failures.append("verification_summary_empty")
+    return failures
+
+
+def planning_context_required_action(failures, interview):
+    if "pending_user_question" in failures:
+        return "Ask the pending user question exactly, then record the answer with `co planner interview record`."
+    if any(item in failures for item in ["missing_ambiguity_score", "ambiguity_score_stale", "ambiguity_score_missing"]):
+        return "Run `co planner interview score --mode auto`, then rerun `co planner generate-skeleton`."
+    if any(item.startswith("ambiguity>") or item == "ambiguity_ready=false" or item.startswith("clarity_floors_failed=") for item in failures):
+        latest = interview.get("ambiguity", {}).get("latest") or {}
+        followup = latest.get("recommended_followup")
+        if followup:
+            return f"Ask or record the recommended follow-up: {followup}"
+        return "Run `co planner interview ask-next` to collect the missing clarification."
+    if any(item.startswith("missing_user_decision_tracks=") for item in failures):
+        return "Ask the user for the missing decision track, record the answer, rescore, close the track, and rerun `co planner generate-skeleton`."
+    if any(item.startswith("missing_closure_checks=") for item in failures):
+        return "Run the missing `co planner interview closure-check ...` commands, then rerun `co planner generate-skeleton`."
+    if any(item.startswith("open_tracks=") or item == "interview_not_closed" for item in failures):
+        return "Close remaining interview tracks and run `co planner interview close --summary \"...\"`, then rerun `co planner generate-skeleton`."
+    return "Resolve the planning context gate failures, then rerun `co planner generate-skeleton`."
+
+
 def default_review_state():
     return {
         "status": "not_run",
@@ -1143,6 +1322,7 @@ def command_review_context(_args):
         "draft": bundle["draft"],
         "plan": bundle["plan"],
         "tasks": bundle["tasks"],
+        "planning_context": bundle["planning_context"],
         "interview": bundle["interview"],
         "status": bundle["status"],
         "notes": bundle["notes"],
@@ -1254,8 +1434,8 @@ def planner_init(args):
     )
     print_result(
         {"active_plan_id": args.plan_id, "plan_dir": str(plan_dir)},
-        "Explore the repository for code facts, then run `co planner interview ask-next --runner codex`.",
-        "co planner interview ask-next --runner codex",
+        "Explore the repository for code facts, then run `co planner interview ask-next`.",
+        "co planner interview ask-next",
     )
 
 
@@ -1293,6 +1473,9 @@ def agent_context(plan_dir):
         "draft": read_text_file(plan_dir / "draft.md"),
         "plan": load_yaml(plan_dir / "plan.yaml"),
         "tasks": load_yaml(plan_dir / "tasks.yaml"),
+        "planning_context": load_yaml(plan_dir / "planning_context.yaml")
+        if (plan_dir / "planning_context.yaml").exists()
+        else None,
         "interview": load_yaml(plan_dir / "interview.yaml"),
         "status": load_yaml(plan_dir / "status.yaml"),
         "notes": load_yaml(plan_dir / "notes.yaml"),
@@ -1314,6 +1497,7 @@ def append_interview_agent_run(plan_dir, interview, role, status, output=None, e
         "role": role,
         "model": CODEX_AGENT_DEFAULT_MODEL,
         "sandbox": CODEX_AGENT_DEFAULT_SANDBOX,
+        "reasoning_effort": CODEX_AGENT_REASONING_EFFORT,
         "command_options": command_options
         or {
             "json": True,
@@ -1321,6 +1505,7 @@ def append_interview_agent_run(plan_dir, interview, role, status, output=None, e
             "ephemeral": True,
             "sandbox": CODEX_AGENT_DEFAULT_SANDBOX,
             "model": CODEX_AGENT_DEFAULT_MODEL,
+            "reasoning_effort": CODEX_AGENT_REASONING_EFFORT,
         },
         "status": status,
         "output": output,
@@ -1515,8 +1700,6 @@ def planner_interview_ask(args):
 
 def planner_interview_ask_next(args):
     _, plan_dir = active_plan()
-    if args.runner != "codex":
-        raise ExError("interview ask-next supports only --runner codex")
     interview = load_yaml(plan_dir / "interview.yaml")
     validate_interview(interview)
     output = run_interview_codex_agent(
@@ -1563,7 +1746,7 @@ def planner_interview_ask_next(args):
             "reason": output["reason"],
         },
         "Run the command in next_command.",
-        "co planner interview score --runner codex --mode auto",
+        "co planner interview score --mode auto",
     )
 
 
@@ -1625,13 +1808,12 @@ def normalize_ambiguity_score(output, interview, requested_mode):
         "round_count": len(interview.get("rounds", [])),
         "scoring_temperature_intent": AMBIGUITY_SCORING_TEMPERATURE_INTENT,
         "model": CODEX_AGENT_DEFAULT_MODEL,
+        "reasoning_effort": CODEX_AGENT_REASONING_EFFORT,
     }
 
 
 def planner_interview_score(args):
     _, plan_dir = active_plan()
-    if args.runner != "codex":
-        raise ExError("interview score supports only --runner codex")
     interview = load_yaml(plan_dir / "interview.yaml")
     validate_interview(interview)
     output = run_interview_codex_agent(
@@ -1723,8 +1905,8 @@ def planner_interview_record(args):
     )
     print_result(
         {"round": round_item, "non_user_answer_streak": interview["non_user_answer_streak"]},
-        "Run `co planner interview score --runner codex --mode auto`.",
-        "co planner interview score --runner codex --mode auto",
+        "Run `co planner interview score --mode auto`.",
+        "co planner interview score --mode auto",
     )
 
 
@@ -1952,11 +2134,43 @@ def skeleton_tasks():
 
 
 def planner_generate_skeleton(_args):
-    _, plan_dir = active_plan()
-    require_interview_closed(plan_dir, "generate skeleton")
-    interview = load_yaml(plan_dir / "interview.yaml")
+    plan_id, plan_dir = active_plan()
     plan = load_yaml(plan_dir / "plan.yaml")
     title = plan.get("title") or plan_dir.name.replace("-", " ").title()
+    interview = load_yaml(plan_dir / "interview.yaml")
+    try:
+        require_interview_closed(plan_dir, "generate skeleton")
+    except ExError as exc:
+        context = build_planning_context(plan_id, plan_dir, title, interview)
+        failures = planning_context_gate_failures(interview)
+        if not failures:
+            failures = [str(exc)]
+        raise GateError(
+            "planning context gate failed",
+            {
+                "gate": "planning_context",
+                "gate_failures": failures,
+                "coverage": context["coverage"],
+                "ambiguity": context["ambiguity"],
+            },
+            planning_context_required_action(failures, interview),
+        ) from exc
+    context = build_planning_context(plan_id, plan_dir, title, interview)
+    failures = planning_context_gate_failures(interview)
+    if failures:
+        raise GateError(
+            "planning context gate failed",
+            {
+                "gate": "planning_context",
+                "gate_failures": failures,
+                "coverage": context["coverage"],
+                "ambiguity": context["ambiguity"],
+            },
+            planning_context_required_action(failures, interview),
+        )
+    interview = load_yaml(plan_dir / "interview.yaml")
+    context = build_planning_context(plan_id, plan_dir, title, interview)
+    write_yaml(plan_dir / "planning_context.yaml", context)
     (plan_dir / "draft.md").write_text(skeleton_draft(title, interview), encoding="utf-8")
     write_yaml(plan_dir / "plan.yaml", skeleton_plan(title, interview))
     tasks = skeleton_tasks()
@@ -1966,13 +2180,23 @@ def planner_generate_skeleton(_args):
     append_event(
         plan_dir,
         "skeleton_generated",
-        "Generated draft, plan, and task skeletons.",
-        ["draft.md", "plan.yaml", "tasks.yaml", "status.yaml#tasks", "status.yaml#review"],
+        "Generated planning context, draft, plan, and task skeletons.",
+        [
+            "planning_context.yaml",
+            "draft.md",
+            "plan.yaml",
+            "tasks.yaml",
+            "status.yaml#tasks",
+            "status.yaml#review",
+        ],
         "co planner generate-skeleton",
     )
     print_result(
-        {"written": ["draft.md", "plan.yaml", "tasks.yaml"]},
-        "Patch only draft.md, plan.yaml, and tasks.yaml, then run `co planner validate`.",
+        {
+            "written": ["planning_context.yaml", "draft.md", "plan.yaml", "tasks.yaml"],
+            "planning_context_file": str(plan_dir / "planning_context.yaml"),
+        },
+        "Read planning_context_file, patch only draft.md, plan.yaml, and tasks.yaml from that context, then run `co planner validate`.",
         "co planner validate",
     )
 
@@ -2049,14 +2273,12 @@ def planner_validate(_args):
     validate_status(status, tasks)
     print_result(
         {"validated": ["draft.md", "plan.yaml", "tasks.yaml", "interview.yaml", "status.yaml"]},
-        "If pre-draft review has not passed, run `co planner review run --runner codex --stage pre-draft`; otherwise continue approval or finalize.",
+        "If pre-draft review has not passed, run `co planner review run --stage pre-draft`; otherwise continue approval or finalize.",
     )
 
 
 def planner_review_run(args):
     _, plan_dir = active_plan()
-    if args.runner != "codex":
-        raise ExError("planner review supports only --runner codex")
     if args.stage != "pre-draft":
         raise ExError("planner review supports only --stage pre-draft")
     require_interview_closed(plan_dir, "planner review")
@@ -2130,7 +2352,7 @@ def planner_review_run(args):
         next_command = "co show --file draft"
     else:
         required_action = "Patch valid reviewer findings in draft.md, plan.yaml, or tasks.yaml, then rerun pre-draft review."
-        next_command = "co planner review run --runner codex --stage pre-draft"
+        next_command = "co planner review run --stage pre-draft"
     print_result(
         {"ok": status["review"]["status"] == "passed", "review": status["review"], "results": results},
         required_action,
@@ -2145,7 +2367,7 @@ def planner_review_status(_args):
     if status["review"]["status"] == "passed":
         required_action = "Continue user draft review or draft approval."
     else:
-        required_action = "Run or rerun `co planner review run --runner codex --stage pre-draft` after fixing bundle files."
+        required_action = "Run or rerun `co planner review run --stage pre-draft` after fixing bundle files."
     print_result({"review": status["review"]}, required_action)
 
 
@@ -2208,6 +2430,79 @@ def exec_show_task(args):
     )
 
 
+def current_task_status(bundle, current_id):
+    task = find_task(bundle, current_id)
+    return {
+        "task": task,
+        "summary": {
+            "id": current_id,
+            "title": task.get("title"),
+            "status": task_status(bundle).get(current_id),
+            "next_required_action": f"Continue {current_id} until required evidence is recorded and completion gates pass.",
+        },
+        "view": {
+            "files": task.get("files"),
+            "verification": task.get("verification"),
+            "acceptance_criteria": task.get("acceptance_criteria"),
+        },
+        "evidence_state": {
+            "required": [item.get("file") for item in expected_evidence_for_task(task)],
+            "recorded": [
+                record.get("artifact")
+                for record in recorded_evidence_for_task(bundle, current_id)
+            ],
+        },
+    }
+
+
+def current_task_allowed_commands(current_id):
+    return [
+        f'co exec evidence add --task {current_id} --step <step-id> --name <file> --command "..." --exit-code <code> --success true|false --stdin',
+        f'co exec repair {current_id} --field <path> --reason "..."',
+        f"co exec complete-task {current_id}",
+        f'co exec halt --kind user_decision|external_environment --task {current_id} --reason "..."',
+    ]
+
+
+def current_task_forbidden_actions(current_id):
+    return [
+        f"claim another task while {current_id} is Doing",
+        "finish before final verification is Done",
+        "mark Done without required evidence",
+    ]
+
+
+def idle_allowed_commands(bundle, ready):
+    allowed = [f"co exec claim {task['id']}" for task in ready]
+    if can_finish(bundle):
+        allowed.append("co exec finish")
+    return allowed
+
+
+def idle_forbidden_actions():
+    return [
+        "claim a task that is not ready",
+        "finish before all tasks and final verification are Done",
+    ]
+
+
+def exec_status_next_action(bundle, current_id, ready):
+    phase = bundle["status"].get("phase")
+    if phase == "ready_for_exec":
+        return "Run `co exec start`.", "co exec start"
+    if phase == "executing" and current_id:
+        return "Continue current_task; record evidence, repair, complete, or halt using allowed_now.", None
+    if phase == "executing" and ready:
+        return "Claim exactly one task from progress.ready_now.", f"co exec claim {ready[0]['id']}"
+    if phase == "executing" and can_finish(bundle):
+        return "Run `co exec finish`.", "co exec finish"
+    if phase == "halted":
+        return "Stop execution and report halt.kind and halt.reason to the user.", None
+    if phase == "complete":
+        return "Report final completion.", None
+    return "Follow allowed_now and forbidden_now; do not mutate bundle YAML directly.", None
+
+
 def exec_status(_args):
     bundle = load_bundle()
     groups = status_groups(bundle)
@@ -2215,41 +2510,17 @@ def exec_status(_args):
     current_id = bundle["status"].get("current_task")
     current = None
     current_view = None
-    allowed = []
-    forbidden = []
     evidence_state = None
     if current_id:
-        task = find_task(bundle, current_id)
-        current = {
-            "id": current_id,
-            "title": task.get("title"),
-            "status": task_status(bundle).get(current_id),
-            "next_required_action": f"Continue {current_id} until required evidence is recorded and completion gates pass.",
-        }
-        current_view = {
-            "files": task.get("files"),
-            "verification": task.get("verification"),
-            "acceptance_criteria": task.get("acceptance_criteria"),
-        }
-        expected = [item.get("file") for item in expected_evidence_for_task(task)]
-        recorded = [record.get("artifact") for record in recorded_evidence_for_task(bundle, current_id)]
-        evidence_state = {"required": expected, "recorded": recorded}
-        allowed = [
-            f'co exec evidence add --task {current_id} --step <step-id> --name <file> --command "..." --exit-code <code> --success true|false --stdin',
-            f'co exec repair {current_id} --field <path> --reason "..."',
-            f"co exec complete-task {current_id}",
-            f'co exec halt --kind user_decision|external_environment --task {current_id} --reason "..."',
-        ]
-        forbidden = [
-            f"claim another task while {current_id} is Doing",
-            "finish before final verification is Done",
-            "mark Done without required evidence",
-        ]
+        current_state = current_task_status(bundle, current_id)
+        current = current_state["summary"]
+        current_view = current_state["view"]
+        evidence_state = current_state["evidence_state"]
+        allowed = current_task_allowed_commands(current_id)
+        forbidden = current_task_forbidden_actions(current_id)
     else:
-        allowed = [f"co exec claim {task['id']}" for task in ready]
-        if can_finish(bundle):
-            allowed.append("co exec finish")
-        forbidden = ["claim a task that is not ready", "finish before all tasks and final verification are Done"]
+        allowed = idle_allowed_commands(bundle, ready)
+        forbidden = idle_forbidden_actions()
     data = {
         "active_plan": {"id": bundle["plan_id"], "dir": str(bundle["plan_dir"])},
         "phase": bundle["status"].get("phase"),
@@ -2265,28 +2536,7 @@ def exec_status(_args):
             "message": "Do not switch tasks or widen scope. Complete or repair the current task unless halt is required."
         },
     }
-    phase = bundle["status"].get("phase")
-    if phase == "ready_for_exec":
-        required_action = "Run `co exec start`."
-        next_command = "co exec start"
-    elif phase == "executing" and current_id:
-        required_action = "Continue current_task; record evidence, repair, complete, or halt using allowed_now."
-        next_command = None
-    elif phase == "executing" and ready:
-        required_action = "Claim exactly one task from progress.ready_now."
-        next_command = f"co exec claim {ready[0]['id']}"
-    elif phase == "executing" and can_finish(bundle):
-        required_action = "Run `co exec finish`."
-        next_command = "co exec finish"
-    elif phase == "halted":
-        required_action = "Stop execution and report halt.kind and halt.reason to the user."
-        next_command = None
-    elif phase == "complete":
-        required_action = "Report final completion."
-        next_command = None
-    else:
-        required_action = "Follow allowed_now and forbidden_now; do not mutate bundle YAML directly."
-        next_command = None
+    required_action, next_command = exec_status_next_action(bundle, current_id, ready)
     print_result(data, required_action, next_command)
 
 
@@ -2515,7 +2765,21 @@ def build_parser():
     current.set_defaults(func=command_current)
 
     show = sub.add_parser("show")
-    show.add_argument("--file", required=True, choices=["draft", "plan", "tasks", "interview", "status", "notes", "events", "evidence"])
+    show.add_argument(
+        "--file",
+        required=True,
+        choices=[
+            "draft",
+            "plan",
+            "tasks",
+            "planning-context",
+            "interview",
+            "status",
+            "notes",
+            "events",
+            "evidence",
+        ],
+    )
     show.set_defaults(func=command_show)
 
     review_context = sub.add_parser("review-context")
@@ -2538,10 +2802,8 @@ def build_parser():
     interview_status = interview_sub.add_parser("status")
     interview_status.set_defaults(func=planner_interview_status)
     interview_ask_next = interview_sub.add_parser("ask-next")
-    interview_ask_next.add_argument("--runner", choices=["codex"], required=True)
     interview_ask_next.set_defaults(func=planner_interview_ask_next)
     interview_score = interview_sub.add_parser("score")
-    interview_score.add_argument("--runner", choices=["codex"], required=True)
     interview_score.add_argument("--mode", choices=["auto", "greenfield", "brownfield"], default="auto")
     interview_score.set_defaults(func=planner_interview_score)
     interview_ask = interview_sub.add_parser("ask")
@@ -2588,7 +2850,6 @@ def build_parser():
     review = planner_sub.add_parser("review")
     review_sub = review.add_subparsers(dest="review_command", required=True)
     review_run = review_sub.add_parser("run")
-    review_run.add_argument("--runner", choices=["codex"], required=True)
     review_run.add_argument("--stage", choices=["pre-draft"], required=True)
     review_run.set_defaults(func=planner_review_run)
     review_status = review_sub.add_parser("status")
@@ -2671,6 +2932,11 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         args.func(args)
+    except GateError as exc:
+        data = {"ok": False, "error": str(exc)}
+        data.update(exc.data)
+        print_result(data, exc.required_action, exc.next_command)
+        return 1
     except ExError as exc:
         sys.stdout.write("ok: false\n")
         sys.stdout.write("error: " + repr(str(exc)) + "\n")

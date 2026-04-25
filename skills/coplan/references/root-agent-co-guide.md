@@ -33,7 +33,7 @@ Root-agent rules:
 Exceptions:
 
 - `co show --file draft` prints raw Markdown for user review.
-- `co show --file plan|tasks|interview|status|notes|events|evidence` prints the requested YAML file.
+- `co show --file plan|tasks|planning-context|interview|status|notes|events|evidence` prints the requested YAML file.
 - `co review-context` prints a large YAML context bundle for diagnostics.
 
 ## General Commands
@@ -49,18 +49,18 @@ Exceptions:
 |---|---|---|
 | `co planner init --plan-id <id> --title "<title>"` | `ok`, `active_plan_id`, `plan_dir`, `required_action`, `next_command` | Explore the repo, then run `next_command`. |
 | `co planner interview status` | `ok`, `status`, `draft_ready`, `open_tracks`, `closure_blockers`, `ambiguity`, `required_action` | Read blockers and follow `required_action`. |
-| `co planner interview ask-next --runner codex` | `ok`, `action`, possibly `pending_user_question`, `reason`, `required_action`, possibly `next_command` | Ask the user, accept auto-recorded fact, or run `next_command`. |
+| `co planner interview ask-next` | `ok`, `action`, possibly `pending_user_question`, `reason`, `required_action`, possibly `next_command` | Ask the user, accept auto-recorded fact, or run `next_command`. |
 | `co planner interview ask ...` | `ok`, `pending_user_question`, `required_action` | Ask the user exactly `pending_user_question.question`. |
 | `co planner interview record ...` | `ok`, `round`, `non_user_answer_streak`, `required_action`, `next_command` | Run `next_command` to score ambiguity. |
-| `co planner interview score --runner codex --mode auto` | `ok`, `ambiguity`, `required_action` | If not ready, ask the recommended follow-up. If ready, close tracks/checks and close the interview. |
+| `co planner interview score --mode auto` | `ok`, `ambiguity`, `required_action` | If not ready, ask the recommended follow-up. If ready, close tracks/checks and close the interview. |
 | `co planner interview track close <track> --summary "..."` | `ok`, `track`, `status`, `required_action` | Continue remaining track/check gates or close the interview. |
 | `co planner interview track open <track> --reason "..."` | `ok`, `track`, `status`, `required_action` | Create a pending question, record the answer, rescore, and close again. |
 | `co planner interview closure-check <check> --summary "..."` | `ok`, `check`, `passed`, `required_action` | Continue remaining closure checks or close the interview. |
 | `co planner interview blocker add|clear --reason "..."` | `ok`, `material_blockers`, `required_action` | Resolve blockers; close only when blockers are empty. |
 | `co planner interview close --summary "..."` | `ok`, `status`, `draft_ready`, `required_action`, `next_command` | Run `next_command` to generate skeleton files. |
-| `co planner generate-skeleton` | `ok`, `written`, `required_action`, `next_command` | Patch only `draft.md`, `plan.yaml`, and `tasks.yaml`, then validate. |
+| `co planner generate-skeleton` | `ok`, `written`, `planning_context_file`, `required_action`, `next_command` | Read `planning_context_file`, patch only `draft.md`, `plan.yaml`, and `tasks.yaml`, then validate. |
 | `co planner validate` | `ok`, `validated`, `required_action` | Run pre-draft review, approve draft, or finalize depending on current phase. |
-| `co planner review run --runner codex --stage pre-draft` | `ok`, `review`, `results`, `required_action`, `next_command` | If PASS, show draft. If FAIL, patch valid findings and rerun review. |
+| `co planner review run --stage pre-draft` | `ok`, `review`, `results`, `required_action`, `next_command` | If PASS, show draft. If FAIL, patch valid findings and rerun review. |
 | `co planner review status` | `ok`, `review`, `required_action` | Continue review, approval, or finalize path. |
 | `co planner approve-draft --comment "..."` | `ok`, `phase`, `required_action`, `next_command` | Run validate, then finalize. |
 | `co planner finalize` | `ok`, `phase`, `required_action`, `next_command` | Switch to `coexec` and start with `co exec status`. |
@@ -103,7 +103,7 @@ ok: true
 action: ready_for_score
 reason: Enough interview material exists.
 required_action: Run the command in next_command.
-next_command: co planner interview score --runner codex --mode auto
+next_command: co planner interview score --mode auto
 ```
 
 Root action:

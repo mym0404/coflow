@@ -7,7 +7,7 @@ Review is mandatory and runs through `codex exec`. Multiple Codex CLI reviewers 
 ## Command
 
 ```bash
-co planner review run --runner codex --stage pre-draft
+co planner review run --stage pre-draft
 ```
 
 The command runs both required reviewers in parallel:

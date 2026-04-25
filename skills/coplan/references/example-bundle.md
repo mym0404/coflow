@@ -243,6 +243,7 @@ ambiguity:
     round_count: 6
     scoring_temperature_intent: 0.1
     model: gpt-5.5
+    reasoning_effort: medium
   history: []
 closure:
   ready: true
