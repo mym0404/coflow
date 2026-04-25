@@ -1413,6 +1413,17 @@ def sync_status_tasks(plan_dir, tasks_data):
     write_yaml(plan_dir / "status.yaml", status)
 
 
+def reset_authored_bundle(plan_dir):
+    tasks = {"tasks": []}
+    write_yaml(plan_dir / "tasks.yaml", tasks)
+    status = load_yaml(plan_dir / "status.yaml")
+    status["tasks"] = {}
+    status["current_task"] = None
+    status["bundle_inspection"] = default_bundle_inspection()
+    validate_status(status, tasks)
+    write_yaml(plan_dir / "status.yaml", status)
+
+
 def interview_code_fact_source_refs(interview):
     refs = []
     for round_item in interview.get("rounds", []):
@@ -2458,6 +2469,7 @@ def write_plan_seed_internal(plan_dir):
     }
     validate_plan_seed(plan_seed)
     write_yaml(plan_dir / "plan_seed.yaml", plan_seed)
+    reset_authored_bundle(plan_dir)
     reset_seed_review_state(plan_dir)
     append_flow_log(
         plan_dir,
@@ -2492,6 +2504,7 @@ def revise_plan_seed_internal(plan_dir, feedback):
     }
     validate_plan_seed(plan_seed)
     write_yaml(plan_dir / "plan_seed.yaml", plan_seed)
+    reset_authored_bundle(plan_dir)
     reset_seed_review_state(plan_dir, preserve_feedback=True)
     append_flow_log(
         plan_dir,
