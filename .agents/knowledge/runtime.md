@@ -83,7 +83,7 @@ High-value event families:
 Use the flow log to check responsibility boundaries:
 
 - Root stays thin when each `root_action.emit` is followed by an allowed `flow.command.*` boundary instead of direct bundle edits.
-- Interview behaves like an iterator when one `flow respond` is followed by CLI-owned scoring, closure, question creation, authoring, or draft presentation events.
+- Interview behaves like an iterator when one `flow respond` is followed by CLI-owned scoring, hidden-assumption follow-up, closure, question creation, authoring, or draft presentation events.
 - Codex CLI agents remain internal details when `codex_agent.*` appears between CLI events rather than as root-facing commands.
 - Executor task selection stays in the CLI when `task.claimed` and `task.completed` are emitted by flow events.
 - Verification failure reaches the right boundary when failed `evidence.recorded` is followed by `root_action.emit` with `repair_task`.

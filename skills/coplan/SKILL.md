@@ -113,6 +113,7 @@ co flow respond --stdin 또는 co flow next
 ```
 
 Planning이 끝나면 `root_action.type: execute_task`가 반환되고, root agent는 `coexec`로 전환한다.
+인터뷰가 충분해 보여도 `co flow`가 숨은 가정 확인 질문을 `ask_user`로 반환할 수 있다. 이 경우에도 다른 질문과 동일하게 그대로 묻고 답변을 전달한다.
 
 ## 명령 제한
 

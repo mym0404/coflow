@@ -205,6 +205,13 @@ rounds:
     question: When should execution halt instead of repairing locally?
     answer: Halt only for a user decision or external environment issue.
     source: from-user
+  - id: Q7
+    route: code_plus_decision
+    track: verification
+    question: Which broader suite should final verification run?
+    answer: Run the broader HTTP integration suite after the focused health check.
+    source: from-user
+    purpose: hidden_assumption_followup
 pending_user_question: null
 agent_runs: []
 ambiguity:
@@ -239,7 +246,7 @@ ambiguity:
       track: verification
       question: Which broader suite should final verification run?
     summary: Requirements are clear enough for bundle generation.
-    round_count: 6
+    round_count: 7
     scoring_temperature_intent: 0.1
     model: gpt-5.5
     reasoning_effort: medium
@@ -255,6 +262,9 @@ closure:
     user_tradeoffs_explicit:
       passed: true
       summary: Scope, non-goals, and response constraints came from user judgment.
+    hidden_assumptions_reviewed:
+      passed: true
+      summary: Broader verification scope was clarified before drafting.
     executor_determinism:
       passed: true
       summary: The executor has one route contract and concrete file surface.

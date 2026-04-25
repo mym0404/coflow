@@ -29,7 +29,7 @@ sequenceDiagram
     else 내부 진행 가능
       Co->>Agent: [기계] ask-next or ambiguity scorer
       Agent-->>Co: [추론형식] schema-bound JSON
-      Co->>Co: [기계] fact 기록, ambiguity 계산, interview gate 처리
+      Co->>Co: [기계] fact 기록, ambiguity 계산, 숨은 가정 follow-up gate 처리
     end
   end
 
@@ -78,7 +78,7 @@ sequenceDiagram
 flowchart TD
   Start(["[유저] planning 요청"])
   Init["[추론기계] co flow init"]
-  Iterate["[기계] interview 상태 진행"]
+  Iterate["[기계] interview와 숨은 가정 gate 진행"]
   Boundary{"[기계] root boundary?"}
   Question["[추론기계] 질문 전달"]
   Answer["[유저] 답변 또는 수정"]

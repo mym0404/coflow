@@ -132,6 +132,7 @@ Valid routes:
 - no pending user question remains
 - every required track has at least one round
 - `scope`, `outputs`, and `verification` have user-judgment rounds
+- a hidden-assumption follow-up has been answered after ambiguity scoring reaches readiness
 - closure checks passed
 - material blockers are empty
 - latest ambiguity score is fresh for the current round count

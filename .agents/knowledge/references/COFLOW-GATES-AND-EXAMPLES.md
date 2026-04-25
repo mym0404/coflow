@@ -32,6 +32,7 @@ A bundle is planner-ready only when:
 - Route sources must match `from-code...`, `from-user...`, or `from-research...`.
 - Closure requires at least one round for every required track.
 - Closure requires user-judgment rounds on `scope`, `outputs`, and `verification`.
+- Closure requires one answered hidden-assumption follow-up after ambiguity scoring reaches readiness.
 - `code_fact` and `research_confirmation` increment `non_user_answer_streak`.
 - `user_decision` and `code_plus_decision` reset `non_user_answer_streak`.
 - Once `non_user_answer_streak` reaches 3, the next record must be `user_decision` or `code_plus_decision`.

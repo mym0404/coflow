@@ -59,10 +59,21 @@ INTERVIEW_MIN_USER_ROUNDS = len(INTERVIEW_REQUIRED_USER_TRACKS)
 INTERVIEW_CLOSURE_CHECKS = (
     "desired_output_explicit",
     "user_tradeoffs_explicit",
+    "hidden_assumptions_reviewed",
     "executor_determinism",
     "verification_proves_behavior",
     "no_material_questions",
 )
+INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE = "hidden_assumption_followup"
+INTERVIEW_QUESTION_PURPOSES = {INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE}
+INTERVIEW_CLOSURE_CHECK_SUMMARIES = {
+    "desired_output_explicit": "Desired output is captured by the interview tracks.",
+    "user_tradeoffs_explicit": "User-owned tradeoffs are recorded before drafting.",
+    "hidden_assumptions_reviewed": "A hidden-assumption follow-up was answered before closure.",
+    "executor_determinism": "Executor inputs are deterministic enough for a static plan.",
+    "verification_proves_behavior": "Verification criteria are recorded for executor proof.",
+    "no_material_questions": "No material user question remains pending.",
+}
 INTERVIEW_SOURCE_PREFIXES = {
     "code_fact": ("from-code",),
     "research_confirmation": ("from-research",),
@@ -923,6 +934,9 @@ def validate_interview(data):
             raise ExError(f"interview round {round_item['id']} has invalid route")
         if round_item["track"] not in INTERVIEW_REQUIRED_TRACK_SET:
             raise ExError(f"interview round {round_item['id']} has invalid track")
+        purpose = round_item.get("purpose")
+        if purpose is not None and purpose not in INTERVIEW_QUESTION_PURPOSES:
+            raise ExError(f"interview round {round_item['id']} has invalid purpose")
         source = str(round_item.get("source", "")).lower()
         source_prefixes = INTERVIEW_SOURCE_PREFIXES[round_item["route"]]
         if not any(source.startswith(prefix) for prefix in source_prefixes):
@@ -938,6 +952,9 @@ def validate_interview(data):
             raise ExError("pending_user_question route must require user judgment")
         if pending["track"] not in INTERVIEW_REQUIRED_TRACK_SET:
             raise ExError("pending_user_question track is invalid")
+        purpose = pending.get("purpose")
+        if purpose is not None and purpose not in INTERVIEW_QUESTION_PURPOSES:
+            raise ExError("pending_user_question purpose is invalid")
     if not isinstance(data["agent_runs"], list):
         raise ExError("interview.yaml agent_runs must be a list")
     ambiguity = data["ambiguity"]
@@ -1001,6 +1018,43 @@ def interview_round_tracks(interview):
     return tracks, user_tracks
 
 
+def interview_hidden_assumptions_reviewed(interview):
+    return any(
+        item.get("purpose") == INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE
+        for item in interview.get("rounds", [])
+    )
+
+
+def interview_hidden_assumption_required(interview, latest=None):
+    if interview_hidden_assumptions_reviewed(interview):
+        return False
+    score = latest if isinstance(latest, dict) else interview.get("ambiguity", {}).get("latest")
+    if not isinstance(score, dict):
+        return False
+    if score.get("round_count") != len(interview.get("rounds", [])):
+        return False
+    return score.get("ready") is True
+
+
+def hidden_assumption_followup(latest):
+    followup = latest.get("recommended_followup") if isinstance(latest, dict) else None
+    if isinstance(followup, dict):
+        route = followup.get("route")
+        track = followup.get("track")
+        question = str(followup.get("question", "")).strip()
+        if route in INTERVIEW_USER_ROUTES and track in INTERVIEW_REQUIRED_TRACK_SET and question:
+            return {"route": route, "track": track, "question": question}
+    return {
+        "route": "user_decision",
+        "track": "constraints",
+        "question": (
+            "Before finalizing this plan, what hidden assumption from the existing "
+            "codebase, docs, or product behavior should the executor verify instead "
+            "of deciding locally?"
+        ),
+    }
+
+
 def interview_closure_blockers(interview):
     rounds = interview.get("rounds", [])
     blockers = []
@@ -1022,6 +1076,8 @@ def interview_closure_blockers(interview):
         blockers.append("missing_user_judgment_tracks=" + ",".join(missing_user_tracks))
     if interview.get("non_user_answer_streak", 0) >= INTERVIEW_NON_USER_STREAK_LIMIT:
         blockers.append("non_user_answer_streak_requires_user_judgment")
+    if interview_hidden_assumption_required(interview):
+        blockers.append("hidden_assumptions_unreviewed")
     missing_checks = [
         check
         for check, state in interview.get("closure", {}).get("checks", {}).items()
@@ -1202,6 +1258,13 @@ def validate_expected_evidence_path(value, label):
         raise ExError(f"{label} file must be under evidence/")
 
 
+def bundle_validation_feedback(exc):
+    return (
+        "The authored bundle failed local validation before review. "
+        f"Fix this exact validation error and return a complete corrected bundle: {exc}"
+    )
+
+
 def validate_task_graph_acyclic(graph):
     visiting = set()
     visited = set()
@@ -1252,6 +1315,7 @@ def planning_context_coverage(interview):
         "missing_tracks": missing_tracks,
         "missing_user_decision_tracks": missing_user_decision_tracks,
         "verification_ready": bool(str(verification_summary).strip()),
+        "hidden_assumptions_reviewed": interview_hidden_assumptions_reviewed(interview),
     }
 
 
@@ -1268,6 +1332,7 @@ def build_planning_context(plan_id, plan_dir, title, interview):
                 "question": item.get("question"),
                 "answer": item.get("answer"),
                 "source": item.get("source"),
+                "purpose": item.get("purpose"),
             }
             for item in rounds
             if item.get("track") == track
@@ -1286,6 +1351,7 @@ def build_planning_context(plan_id, plan_dir, title, interview):
                     "question": item.get("question"),
                     "answer": item.get("answer"),
                     "source": item.get("source"),
+                    "purpose": item.get("purpose"),
                 }
             )
     latest = interview.get("ambiguity", {}).get("latest") or {}
@@ -1347,6 +1413,8 @@ def planning_context_gate_failures(interview):
             + ",".join(coverage["missing_user_decision_tracks"])
         )
     failures.extend(interview_ambiguity_blockers(interview))
+    if interview_hidden_assumption_required(interview):
+        failures.append("hidden_assumptions_unreviewed")
     missing_checks = [
         check
         for check, state in interview.get("closure", {}).get("checks", {}).items()
@@ -1370,6 +1438,10 @@ def planning_context_required_action(failures, interview):
         if followup:
             return f"Ask or record the recommended follow-up: {followup}"
         return "Run `co planner interview ask-next` to collect the missing clarification."
+    if "hidden_assumptions_unreviewed" in failures:
+        latest = interview.get("ambiguity", {}).get("latest") or {}
+        followup = hidden_assumption_followup(latest)
+        return f"Ask or record the hidden-assumption follow-up: {followup}"
     if any(item.startswith("missing_user_decision_tracks=") for item in failures):
         return "Ask the user for the missing decision track, record the answer, rescore, close the track, and rerun `co planner generate-skeleton`."
     if any(item.startswith("missing_closure_checks=") for item in failures):
@@ -1861,6 +1933,7 @@ def score_prompt(plan_dir, project_mode):
         "You are the coplan ambiguity scoring agent. Score requirement clarity from 0.0 to 1.0. Use low-variance judgment; scoring_temperature_intent is 0.1. Return JSON only.\n"
         "Score goal_clarity, constraint_clarity, success_criteria_clarity, and context_clarity. For greenfield, still provide context_clarity but it will not be weighted.\n"
         f"Requested project_mode: {project_mode}.\n"
+        "Set recommended_followup to the single best question for exposing a hidden assumption, user-owned tradeoff, or brownfield context gap before execution. For brownfield work with weak context_clarity, prefer a repository-specific code/docs/behavior boundary question.\n"
         "Do not declare readiness in prose; the CLI will compute weighted clarity and ambiguity.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
     )
@@ -1884,7 +1957,7 @@ def reviewer_prompt(plan_dir, reviewer):
     )
 
 
-def create_pending_question(plan_dir, interview, route, track, question):
+def create_pending_question(plan_dir, interview, route, track, question, *, purpose=None, enforce_focus=True):
     if interview.get("status") == "closed":
         raise ExError("interview is closed; reopen a track before asking more questions")
     if interview.get("pending_user_question") is not None:
@@ -1893,15 +1966,20 @@ def create_pending_question(plan_dir, interview, route, track, question):
         raise ExError(f"unknown interview track: {track}")
     if route not in INTERVIEW_USER_ROUTES:
         raise ExError("interview ask only supports user_decision or code_plus_decision")
-    focus_blocker = interview_focus_blocker(interview, track)
-    if focus_blocker:
-        raise ExError(focus_blocker)
+    if purpose is not None and purpose not in INTERVIEW_QUESTION_PURPOSES:
+        raise ExError(f"unknown interview question purpose: {purpose}")
+    if enforce_focus:
+        focus_blocker = interview_focus_blocker(interview, track)
+        if focus_blocker:
+            raise ExError(focus_blocker)
     pending = {
         "id": next_id(interview.get("rounds", []), "Q"),
         "route": route,
         "track": track,
         "question": question,
     }
+    if purpose:
+        pending["purpose"] = purpose
     interview["pending_user_question"] = pending
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
@@ -1911,6 +1989,7 @@ def create_pending_question(plan_dir, interview, route, track, question):
         question_id=pending["id"],
         route=route,
         track=track,
+        purpose=purpose,
         question_hash=hash_text(question),
         question_bytes=len(question.encode("utf-8")),
     )
@@ -2069,7 +2148,7 @@ def planner_interview_score(args):
     reset_review_status(plan_dir)
     print_result(
         {"ambiguity": score},
-        "If ambiguity.ready is false, ask the recommended follow-up; otherwise close tracks, pass closure checks, and close the interview.",
+        "Ask the recommended follow-up when ambiguity is not ready or hidden assumptions are not reviewed; otherwise close tracks, pass closure checks, and close the interview.",
     )
 
 
@@ -2100,10 +2179,12 @@ def planner_interview_record(args):
         ):
             raise ExError("user-judgment answer must match the pending user question")
         round_id = pending["id"]
+        purpose = pending.get("purpose")
     else:
         if pending is not None:
             raise ExError("record the pending user answer before adding non-user interview facts")
         round_id = next_id(interview.get("rounds", []), "Q")
+        purpose = None
     rounds = interview.setdefault("rounds", [])
     round_item = {
         "id": round_id,
@@ -2113,6 +2194,8 @@ def planner_interview_record(args):
         "answer": args.answer,
         "source": args.source,
     }
+    if purpose:
+        round_item["purpose"] = purpose
     rounds.append(round_item)
     if args.route in INTERVIEW_NON_USER_ROUTES:
         interview["non_user_answer_streak"] = interview.get("non_user_answer_streak", 0) + 1
@@ -3121,10 +3204,12 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
         if pending.get("route") != route or pending.get("track") != track or pending.get("question") != question:
             raise ExError("user-judgment answer must match the pending user question")
         round_id = pending["id"]
+        purpose = pending.get("purpose")
     else:
         if pending is not None:
             raise ExError("record the pending user answer before adding non-user interview facts")
         round_id = next_id(interview.get("rounds", []), "Q")
+        purpose = None
     round_item = {
         "id": round_id,
         "route": route,
@@ -3133,6 +3218,8 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
         "answer": answer,
         "source": source,
     }
+    if purpose:
+        round_item["purpose"] = purpose
     interview.setdefault("rounds", []).append(round_item)
     interview["non_user_answer_streak"] = (
         interview.get("non_user_answer_streak", 0) + 1
@@ -3207,7 +3294,10 @@ def close_interview_if_ready(plan_dir):
         interview["required_tracks"][track]["summary"] = track_summary_from_rounds(interview, track)
     summary = latest.get("summary") or "Interview gates satisfied by recorded rounds and ambiguity score."
     for check in INTERVIEW_CLOSURE_CHECKS:
-        interview["closure"]["checks"][check] = {"passed": True, "summary": summary}
+        interview["closure"]["checks"][check] = {
+            "passed": True,
+            "summary": INTERVIEW_CLOSURE_CHECK_SUMMARIES[check],
+        }
     blockers = interview_closure_blockers(interview)
     if blockers:
         return False
@@ -3250,20 +3340,40 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
         if not isinstance(latest, dict) or latest.get("round_count") != len(interview.get("rounds", [])):
             score_interview_internal(plan_dir)
             continue
-        if close_interview_if_ready(plan_dir):
-            return None
         latest = load_yaml(plan_dir / "interview.yaml").get("ambiguity", {}).get("latest") or {}
         followup = latest.get("recommended_followup")
         if followup and latest.get("ready") is not True:
             interview = load_yaml(plan_dir / "interview.yaml")
+            followup = hidden_assumption_followup(latest)
             pending = create_pending_question(
                 plan_dir,
                 interview,
                 followup["route"],
                 followup["track"],
                 followup["question"],
+                purpose=(
+                    None
+                    if interview_hidden_assumptions_reviewed(interview)
+                    else INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE
+                ),
+                enforce_focus=False,
             )
             return ask_user_action(pending)
+        if interview_hidden_assumption_required(load_yaml(plan_dir / "interview.yaml"), latest):
+            interview = load_yaml(plan_dir / "interview.yaml")
+            followup = hidden_assumption_followup(latest)
+            pending = create_pending_question(
+                plan_dir,
+                interview,
+                followup["route"],
+                followup["track"],
+                followup["question"],
+                purpose=INTERVIEW_HIDDEN_ASSUMPTION_PURPOSE,
+                enforce_focus=False,
+            )
+            return ask_user_action(pending)
+        if close_interview_if_ready(plan_dir):
+            return None
         interview = load_yaml(plan_dir / "interview.yaml")
         output = run_interview_codex_agent(
             plan_dir,
@@ -3315,7 +3425,7 @@ def bundle_author_schema():
         "additionalProperties": False,
         "properties": {
             "step_id": {"type": "string"},
-            "file": {"type": "string"},
+            "file": {"type": "string", "pattern": "^evidence/[^/].+"},
         },
         "required": ["step_id", "file"],
     }
@@ -3429,6 +3539,7 @@ def bundle_author_prompt(plan_dir, review_results=None, feedback=None):
         "You are the coplan bundle_author. Produce final draft.md, plan.yaml, and tasks.yaml content as JSON only.\n"
         "Inspect the repository if needed. Do not edit files directly. Do not leave TBD placeholders.\n"
         "Every task must satisfy the coflow task schema and include at least one final_verification task.\n"
+        "Every expected_evidence.file must be a relative artifact path under evidence/, such as evidence/t01-preflight.txt.\n"
         "Keep execution decisions static so the executor does not need to plan.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
         f"{extra}"
@@ -3537,15 +3648,27 @@ def run_review_internal(plan_dir):
 
 def author_and_review_until_boundary(plan_dir, feedback=None):
     review_results = None
-    for _ in range(2):
+    validation_feedback = None
+    for _ in range(3):
+        author_feedback = "\n".join(item for item in [feedback, validation_feedback] if item)
         output = run_codex_agent(
             "bundle_author",
-            bundle_author_prompt(plan_dir, review_results=review_results, feedback=feedback),
+            bundle_author_prompt(plan_dir, review_results=review_results, feedback=author_feedback),
             bundle_author_schema(),
             cwd=Path.cwd(),
             plan_dir=plan_dir,
         )["output"]
-        write_authored_bundle(plan_dir, output)
+        try:
+            write_authored_bundle(plan_dir, output)
+        except ExError as exc:
+            validation_feedback = bundle_validation_feedback(exc)
+            append_flow_log(
+                plan_dir,
+                "bundle.validation_failed",
+                error=str(exc),
+            )
+            continue
+        validation_feedback = None
         review = run_review_internal(plan_dir)
         if review["review"]["status"] == "passed":
             status = load_yaml(plan_dir / "status.yaml")
