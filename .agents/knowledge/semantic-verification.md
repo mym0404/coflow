@@ -119,13 +119,13 @@ Full credit requires:
 - The root agent presents the plan seed without summarizing, rewriting, or deciding approval.
 - User approval is recorded explicitly before `ready_for_exec`.
 - User feedback is classified before mutation, with wording-only changes revised directly and semantic changes routed back through interview.
-- Bundle review freshness is tied to the current plan seed, tasks, and semantic interview contract.
+- Bundle freshness is tied to the current plan seed, tasks, and semantic interview contract.
 
 High-risk failures:
 
 - Root agent approval or summarization replaces user seed review.
 - Feedback can silently mutate the approved contract without reopening the right planning gate.
-- Tasks remain executable after plan seed or interview contract drift without a fresh review.
+- Tasks remain executable after plan seed or interview contract drift without a fresh bundle fingerprint.
 
 ### C4 Role Philosophy
 
@@ -154,7 +154,7 @@ Full credit requires:
 - `skills/coplan/SKILL.md` and `skills/coexec/SKILL.md` contain the stdout contract and per-action handling, not internal algorithms.
 - Root agents forward user answers, approvals, feedback, evidence, halt reasons, and command output without semantic rewriting.
 - Root agents do not directly read or edit bundle files for normal workflow decisions.
-- Root prompts avoid exposing reviewer internals, scoring formulas, route metadata, or progress snapshots unless the action requires them.
+- Root prompts avoid exposing scoring formulas, route metadata, or progress snapshots unless the action requires them.
 
 High-risk failures:
 
@@ -202,9 +202,9 @@ Question: Do CLI-launched subagent prompts receive enough task and project conte
 
 Full credit requires:
 
-- Interview, scoring, closure, seed, bundle author, reviewer, and feedback subagents receive the same coherent planning context pack.
+- Interview, scoring, closure, seed, bundle author, and feedback subagents receive the same coherent planning context pack.
 - Prompts state each subagent's role, output schema expectation, and decision boundary.
-- Bundle author and reviewers receive `plan_seed`, `tasks`, interview contract, status, notes, and repo path context as relevant.
+- Bundle author receives `plan_seed`, `tasks`, interview contract, status, notes, and repo path context as relevant.
 - Subagents are instructed not to edit files directly unless their role explicitly owns writing through normalized CLI output.
 
 High-risk failures:

@@ -3,6 +3,17 @@ ROLE = "bundle_author"
 
 def schema():
     string_array = {"type": "array", "items": {"type": "string"}}
+    non_empty_string_array = {"type": "array", "minItems": 1, "items": {"type": "string"}}
+    repo_inspection = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "files_read": non_empty_string_array,
+            "commands_considered": non_empty_string_array,
+            "grounding_summary": {"type": "string"},
+        },
+        "required": ["files_read", "commands_considered", "grounding_summary"],
+    }
     verification_step = {
         "type": "object",
         "additionalProperties": False,
@@ -90,20 +101,20 @@ def schema():
                 "required": ["tasks"],
             },
             "summary": {"type": "string"},
+            "repo_inspection": repo_inspection,
         },
-        "required": ["tasks", "summary"],
+        "required": ["tasks", "summary", "repo_inspection"],
     }
 
 
-def prompt(*, context, review_results=None, feedback=None, dump_json):
+def prompt(*, context, feedback=None):
     extra = ""
-    if review_results:
-        extra += "\nBundle review findings to fix:\n" + dump_json(review_results)
     if feedback:
         extra += "\nUser seed feedback to apply:\n" + feedback
     return (
         "You are the coplan bundle_author. Produce final tasks.yaml content as JSON only.\n"
         "Use plan_seed.yaml as the source of truth. Inspect the repository only to ground implementation boundaries and commands. Do not edit files directly. Do not leave TBD placeholders.\n"
+        "Return repo_inspection with the repo files you read, commands you considered, and a concise grounding_summary. Do not include execution evidence artifacts there.\n"
         "Do not expand, narrow, or reinterpret the seed. Project goal, constraints, non-goals, success criteria, execution boundaries, and verification expectations must be projected into task context, must_do, must_not_do, acceptance_criteria, and verification.\n"
         "Every task must satisfy the coflow task schema and include at least one final_verification task.\n"
         "Every expected_evidence.file must be a relative artifact path under evidence/, such as evidence/t01-preflight.txt.\n"
@@ -117,4 +128,10 @@ def summarize(output):
     tasks = output.get("tasks", {}).get("tasks", []) if isinstance(output.get("tasks"), dict) else []
     return {
         "task_count": len(tasks) if isinstance(tasks, list) else None,
+        "repo_inspection_files": (
+            len(output.get("repo_inspection", {}).get("files_read", []))
+            if isinstance(output.get("repo_inspection"), dict)
+            and isinstance(output.get("repo_inspection", {}).get("files_read"), list)
+            else None
+        ),
     }

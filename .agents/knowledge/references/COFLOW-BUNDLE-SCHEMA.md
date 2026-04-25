@@ -157,7 +157,7 @@ Required `closure.checks` fields:
 
 ## `status.yaml`
 
-`status.yaml` stores current phase, review gate state, current task, task states, and halt state.
+`status.yaml` stores current phase, current task, task states, bundle inspection, and halt state.
 
 Valid phases:
 
@@ -168,14 +168,13 @@ Valid phases:
 - `halted`
 - `complete`
 
-Valid review statuses: `not_run`, `passed`, `failed`.
-Valid review stage: `bundle`.
 Valid task states: `Todo`, `Doing`, `Done`.
 Use `halt` only for `user_decision` or `external_environment`.
+`bundle_inspection.author` records the repo files and commands that grounded the authored task bundle.
 
 ## `notes.yaml`
 
-`notes.yaml` is append-only semantic memory. It records review findings, decisions, risks, revisions, repairs, and halt notes.
+`notes.yaml` is append-only semantic memory. It records decisions, risks, revisions, repairs, and halt notes.
 Task-related notes use `task:<task-id>` in `affects`.
 
 ## `evidence.yaml`

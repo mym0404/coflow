@@ -44,6 +44,7 @@ It currently ships two skills:
 - Evergreen repo knowledge starts at `.agents/knowledge/index.md`.
 - Runtime and architecture: `.agents/knowledge/runtime.md`.
 - Verification and blind spots: `.agents/knowledge/verification.md`.
+- Plan bundle debugging: `.agents/knowledge/DEBUG.md`.
 - Semantic verification checklist: `.agents/knowledge/semantic-verification.md`.
 - Ouroboros inspiration references: `.agents/knowledge/references/OUROBOROUS.md`.
 - Skill source docs remain under `skills/` because those files are root-agent runtime skill content, not a secondary knowledge home.

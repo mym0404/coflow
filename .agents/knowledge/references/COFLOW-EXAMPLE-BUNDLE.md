@@ -286,22 +286,18 @@ closure:
 
 ```yaml
 phase: ready_for_exec
-review:
-  status: passed
-  stage: bundle
-  required_reviewers:
-    - contract_reviewer
-    - verification_reviewer
-  passed_reviewers:
-    - contract_reviewer
-    - verification_reviewer
-  last_run_id: R1
-  fingerprint: <sha256>
 current_task: null
 tasks:
   T1: Todo
   FV1: Todo
 halt: null
+bundle_inspection:
+  author:
+    files_read:
+      - AGENTS.md
+    commands_considered:
+      - cargo test health_route_returns_ok -- --exact
+    grounding_summary: Existing tests and repo instructions ground the task boundaries.
 ```
 
 ## `notes.yaml`
@@ -310,12 +306,12 @@ halt: null
 entries:
   - id: N1
     kind: decision
-    text: contract_reviewer PASS: scope and acceptance criteria are aligned.
-    why: Codex CLI bundle review.
+    text: Plan seed approved.
+    why: User approved the presented plan seed.
     affects:
       - plan_seed.yaml
-      - tasks.yaml
-    source: co.py flow next
+      - status.yaml#phase
+    source: co.py flow respond
 ```
 
 ## `evidence.yaml`

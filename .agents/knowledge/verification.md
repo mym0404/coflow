@@ -20,13 +20,13 @@ Use the smallest command that matches the changed surface:
 - Maintenance knowledge placement: verify that bundle schema, gate examples, and example bundles live under `.agents/knowledge/references/`, not under `skills/*/references/`.
 - Skill prompt hard gate: verify that `skills/*/SKILL.md` says the agent is the root agent and contains the essential execution workflow directly.
 - Skill content hard gate: verify that `skills/*/SKILL.md` does not contain maintenance-history wording, old-vs-new explanations, or internal-algorithm responsibility disclaimers that the root agent does not need to perform the skill.
-- Internal algorithm placement: verify that interview, closure audit, seed extraction, and bundle review implementation details are not routed as skill references; orchestration should stay in `skills/coplan/scripts/co.py`, private subagent modules should stay under `skills/coplan/scripts/co/agents/`, and repo knowledge should carry only ownership guidance.
+- Internal algorithm placement: verify that interview, closure audit, seed extraction, and bundle authoring implementation details are not routed as skill references; orchestration should stay in `skills/coplan/scripts/co.py`, private subagent modules should stay under `skills/coplan/scripts/co/agents/`, and repo knowledge should carry only ownership guidance.
 
 ## Coverage Notes
 
 - `compileall` catches Python syntax errors only.
 - Help commands verify argparse registration only.
-- Planner review, interview scoring, bundle authoring, feedback classification, and ask-next paths require the `codex` CLI and can launch subprocess subagents through `skills/coplan/scripts/co/agents/spawn.py`.
+- Interview scoring, bundle authoring, feedback classification, and ask-next paths require the `codex` CLI and can launch subprocess subagents through `skills/coplan/scripts/co/agents/spawn.py`.
 - Flow log smoke checks should confirm event presence and order, not exact timestamps or sequence numbers beyond monotonic append behavior.
 - Full planner and executor behavior is not covered by a committed automated test suite.
 

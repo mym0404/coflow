@@ -20,9 +20,9 @@ A bundle is planner-ready only when:
 - every task has structured verification steps and expected evidence.
 - every expected evidence path is a relative path under `evidence/`.
 - `status.yaml` task ids match `tasks.yaml` task ids.
-- `status.yaml.review.status` is `passed`.
-- `status.yaml.review.fingerprint` matches current `plan_seed.yaml`, `tasks.yaml`, and the semantic interview contract.
+- `status.yaml.bundle_inspection.author` records grounded bundle-author repo inspection.
 - `interview.yaml.seed_review.status` reaches `approved`.
+- `interview.yaml.seed_review.fingerprint` matches current `plan_seed.yaml`, `tasks.yaml`, and the semantic interview contract.
 - `notes.yaml` and `evidence.yaml` are present and CLI-managed.
 - `status.yaml.phase` reaches `ready_for_exec`.
 
@@ -49,14 +49,13 @@ A bundle is planner-ready only when:
 - Clarity floors must pass: goal `0.75`, constraints `0.65`, success criteria `0.70`, brownfield context `0.60`.
 - Meaning-changing plan seed feedback reopens the relevant track internally before new answers are recorded.
 
-## Bundle Review Gate
+## Bundle Authoring Gate
 
-- Review runs after `bundle_author` writes `tasks.yaml`.
-- `contract_reviewer` and `verification_reviewer` run in parallel.
-- Both reviewers must return `PASS`.
-- Review results are recorded in `notes.yaml`.
-- Passing review stores `status.yaml.review.status: passed` and a fingerprint over `plan_seed.yaml`, `tasks.yaml`, and the semantic interview contract.
-- If those inputs change after review, `co.py flow` reruns review before presenting or approving the plan seed.
+- `bundle_author` runs after `plan_seed.yaml` is current for the closed interview.
+- `bundle_author` writes `tasks.yaml` content only through the CLI.
+- Local schema validation must pass before the plan seed is presented.
+- Passing validation stores a seed review fingerprint over `plan_seed.yaml`, `tasks.yaml`, and the semantic interview contract.
+- If those inputs change after presentation, `co.py flow` regenerates or revalidates the bundle before approval.
 
 ## Execution Gate
 

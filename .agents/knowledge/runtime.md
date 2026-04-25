@@ -16,21 +16,21 @@ The runtime has three roles:
 
 The root agent should interact with bundles through `skills/coplan/scripts/co.py flow`.
 The CLI prints YAML, and `root_action` is the next-step contract.
-The root agent should not compute gate readiness, interview next steps, ambiguity, review status, task readiness, task completion, or execution finish state itself.
+The root agent should not compute gate readiness, interview next steps, ambiguity, task readiness, task completion, or execution finish state itself.
 
 ## Flow Ownership
 
 `co.py` exists because Codex App and Codex CLI users do not have a development SDK that lets this repository enforce agent behavior directly in code.
 The reliable control point is therefore the `co.py flow` contract:
 
-- `co.py` owns bundle files, validation, state transitions, notes, evidence records, review freshness, halt gates, and finish gates.
+- `co.py` owns bundle files, validation, state transitions, notes, evidence records, bundle freshness, halt gates, and finish gates.
 - Root-agent-facing skill instructions should keep the agent as a thin `root_action` adapter.
 - If `co.py` can decide or validate a step mechanically, prefer adding the rule to `skills/coplan/scripts/co.py` over relying on prose instructions in the root agent skill.
 - Mechanical continuation belongs inside `co.py`; root-facing `root_action` values must represent real root boundaries, not instructions to call another flow command.
 - Codex CLI subagents are implementation details of `co.py`; their JSON output is normalized by `co.py` before it reaches the root agent.
 - Codex CLI subagents run through `skills/coplan/scripts/co/agents/spawn.py` as isolated ephemeral `codex exec` calls with parent session env stripped, coflow nesting depth capped, and plugin feature loading disabled so MCP/plugin state from the parent session does not affect bounded JSON judgments while user-level Codex instructions remain available.
 - Interview routing and scoring thresholds are CLI internals in `skills/coplan/scripts/co.py`; subagent prompts, schemas, and summaries are CLI internals under `skills/coplan/scripts/co/agents/`. They are not root-agent reference material.
-- Root-facing `co.py flow` stdout should not expose internal scores, route or track metadata, reviewer findings, progress snapshots, or command allowlists unless that data is required to perform the current `root_action`.
+- Root-facing `co.py flow` stdout should not expose internal scores, route or track metadata, progress snapshots, or command allowlists unless that data is required to perform the current `root_action`.
 
 The plan and exec strategy is modeled after the local Ouroboros project, especially its specification-first interview, ambiguity gate, execution orchestration, and evaluation gate ideas.
 Use `.agents/knowledge/references/OUROBOROUS.md` and the linked `OUROBOROS-PLAN`, `OUROBOROS-EXEC`, and `OUROBOROS-EVAL` reference docs when comparing design intent.
@@ -79,7 +79,7 @@ High-value event families:
 - `root_action.emit` shows exactly where control returns to the root agent.
 - `interview.*` shows pending question creation, answer recording, ambiguity scoring, and interview closure.
 - `codex_agent.*` shows private Codex CLI subagent execution behind the CLI.
-- `bundle.authored`, `review.result`, and `review.join` show bundle generation and parallel review behavior.
+- `bundle.authored` shows task bundle generation after plan seed extraction.
 - `seed_feedback.classified` shows plan seed feedback routing.
 - `state.transition`, `task.claimed`, `task.completed`, `evidence.recorded`, `repair.applied`, `halt.recorded`, and `execution.completed` show executor orchestration.
 
@@ -130,4 +130,4 @@ If a needed change would alter user-visible behavior, acceptance criteria, task 
 - `.agents/knowledge/references/COFLOW-BUNDLE-SCHEMA.md` describes CLI-owned bundle files and required fields for maintenance.
 - `.agents/knowledge/references/COFLOW-GATES-AND-EXAMPLES.md` describes CLI-owned planner and executor gates for maintenance.
 - `.agents/knowledge/references/COFLOW-EXAMPLE-BUNDLE.md` is only a density and shape example.
-- Internal interview routing, closure audit, seed extraction, and bundle review orchestration live in `skills/coplan/scripts/co.py`; private subagent prompt/schema code lives in `skills/coplan/scripts/co/agents/`. Repo knowledge records the ownership rule, not a separate root-facing reference file.
+- Internal interview routing, closure audit, seed extraction, and bundle authoring orchestration live in `skills/coplan/scripts/co.py`; private subagent prompt/schema code lives in `skills/coplan/scripts/co/agents/`. Repo knowledge records the ownership rule, not a separate root-facing reference file.

@@ -44,23 +44,7 @@ sequenceDiagram
   Co->>Agent: [기계] bundle_author
   Agent-->>Co: [추론형식] tasks.yaml JSON
   Co->>Co: [기계] task bundle 작성과 검증
-
-  loop bundle review가 통과할 때까지
-    par contract review
-      Co->>Agent: [기계] contract_reviewer
-      Agent-->>Co: [추론형식] PASS or FAIL JSON
-    and verification review
-      Co->>Agent: [기계] verification_reviewer
-      Agent-->>Co: [추론형식] PASS or FAIL JSON
-    end
-    alt reviewer 실패
-      Co->>Agent: [기계] bundle_author with findings
-      Agent-->>Co: [추론형식] revised tasks.yaml JSON
-      Co->>Co: [기계] task bundle 재작성과 검증
-    else reviewer 통과
-      Co-->>Root: [기계] root_action=present_plan_seed
-    end
-  end
+  Co-->>Root: [기계] root_action=present_plan_seed
 
   Root->>User: [추론기계] root_action.plan_seed 표시
   User-->>Root: [유저] 승인 또는 feedback
@@ -73,7 +57,7 @@ sequenceDiagram
   else wording change
     Co->>Agent: [기계] seed_reviser
     Co->>Agent: [기계] bundle_author
-    Co->>Co: [기계] validation과 parallel review 재실행
+    Co->>Co: [기계] validation 재실행
     Co-->>Root: [기계] root_action=present_plan_seed
   else meaning change
     Co->>Co: [기계] track 재개방, feedback 답변 기록, 재계산
@@ -94,9 +78,7 @@ flowchart TD
   Audit["[추론형식] closure audit"]
   Seed["[추론형식] plan seed 생성"]
   Tasks["[추론형식] task bundle 생성"]
-  Review["[기계] bundle review gate"]
   SeedReady{"[기계] plan seed 표시 가능?"}
-  Repair["[추론형식] finding 반영"]
   Present["[추론기계] plan seed 표시"]
   Feedback{"[유저] 승인?"}
   Meaning["[유저] 의미 변경 또는 누락 요구"]
@@ -114,10 +96,7 @@ flowchart TD
   Boundary -->|seed ready| Audit
   Audit --> Seed
   Seed --> Tasks
-  Tasks --> Review
-  Review --> SeedReady
-  SeedReady -->|no| Repair
-  Repair --> Tasks
+  Tasks --> SeedReady
   SeedReady -->|yes| Present
   Present --> Feedback
   Feedback -->|no, meaning change| Meaning
@@ -129,9 +108,6 @@ flowchart TD
   Finalize --> Handoff
 
   linkStyle default stroke:#616161,stroke-width:1.5px
-  linkStyle 0,4,14,15,16,17,18,19 stroke:#2e7d32,stroke-width:2px
-  linkStyle 1,3,12,13,20 stroke:#1565c0,stroke-width:2px
-  linkStyle 2,5,6,7,8,11 stroke:#f9a825,stroke-width:2px
 ```
 
 ## Label Meaning

@@ -21,7 +21,7 @@ description: 사용자 요청을 `co.py flow`로 실행 가능한 plan bundle로
 - 사용자 요청, 답변, approval, feedback은 요약·번역·정리하지 않는다.
 - 사용자 답변, approval, feedback은 `co.py flow respond --stdin`으로 전달한다.
 - Bundle file은 CLI가 쓰는 실행 상태다. Root agent가 직접 수정하지 않는다.
-- `co.py` 의 모든 커맨드들은 내부 CLI의 처리 과정으로 인해 10분 이상 충분히 길어질 수 있으므로 커맨드를 임의로 중지하거나 재시도하지 않고 기다린다.
+- `co.py` 의 모든 커맨드들은 내부 CLI의 처리 과정으로 인해 10분 이상 충분히 길어질 수 있으므로 커맨드를 임의로 중지하거나 재시도하지 않고, 새 root boundary나 실패가 나오기 전까지 반복 진행 보고 없이 기다린다.
 
 ## Flow Stdout
 
@@ -66,7 +66,7 @@ Root agent는 `phase`로 다음 행동을 추론하지 않고, 항상 `root_acti
 ### `root_action`
 
 planner mode에서 Root agent가 지금 수행해야 하는 단 하나의 행동이다.
-CLI가 내부 상태 전이, interview 판단, review, task 선택을 끝낸 뒤 이 객체만 root agent에게 공개한다.
+CLI가 내부 상태 전이, interview 판단, task 선택을 끝낸 뒤 이 객체만 root agent에게 공개한다.
 
 ### `root_action.type`
 
@@ -171,7 +171,7 @@ root_action:
 ```
 
 무엇인지:
-CLI가 interview, ambiguity scoring, closure audit, bundle review를 통과해 사용자 검토용 계획 계약을 만든 상태다.
+CLI가 interview, ambiguity scoring, closure audit, bundle authoring을 통과해 사용자 검토용 계획 계약을 만든 상태다.
 
 해야 할 일:
 `root_action.plan_seed`를 사용자에게 그대로 보여준다.
@@ -194,7 +194,7 @@ root_action:
 ```
 
 무엇인지:
-CLI가 plan seed approval과 bundle review를 완료했고, planning skill의 역할이 끝난 상태다.
+CLI가 plan seed approval을 완료했고, planning skill의 역할이 끝난 상태다.
 
 해야 할 일:
 `root_action.message`를 사용자에게 그대로 안내하고 멈춘다.

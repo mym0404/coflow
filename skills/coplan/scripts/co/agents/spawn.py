@@ -1,4 +1,3 @@
-import concurrent.futures
 import json
 import os
 import shutil
@@ -230,26 +229,3 @@ def run_codex_agent(role, prompt, schema, *, cwd=None, plan_dir=None, append_flo
         output_path.unlink(missing_ok=True)
         schema_path.unlink(missing_ok=True)
 
-
-def run_codex_agents_parallel(agent_specs, *, cwd=None, plan_dir=None, append_flow_log, hash_text, summarize_output):
-    if not agent_specs:
-        return {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(agent_specs)) as executor:
-        future_to_role = {
-            executor.submit(
-                run_codex_agent,
-                spec["role"],
-                spec["prompt"],
-                spec["schema"],
-                cwd=cwd,
-                plan_dir=plan_dir,
-                append_flow_log=append_flow_log,
-                hash_text=hash_text,
-                summarize_output=summarize_output,
-            ): spec["role"]
-            for spec in agent_specs
-        }
-        return {
-            future_to_role[future]: future.result()
-            for future in concurrent.futures.as_completed(future_to_role)
-        }

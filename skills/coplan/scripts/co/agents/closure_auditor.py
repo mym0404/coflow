@@ -39,7 +39,7 @@ def prompt(*, context):
     return (
         "You are the coplan closure_auditor using Seed Closer criteria. Decide only whether the interview is ready for plan_seed extraction and bundle authoring. Return JSON only.\n"
         "A low ambiguity score is not sufficient. PASS only when no implementation-changing decision remains for ownership/source of truth, API/protocol, lifecycle/recovery, migration, cross-client impact, execution boundaries, or verification expectations.\n"
-        "If any material decision remains, action=ask_user and ask exactly one highest-impact follow-up. Do not ask about planning mechanics, bundle files, reviewer setup, or validation process unless the user's task is specifically about those systems.\n"
+        "If any material decision remains, action=ask_user and ask exactly one highest-impact follow-up. Do not ask about planning mechanics, bundle files, or validation process unless the user's task is specifically about those systems.\n"
         "Always populate options with 2-3 concise UI choices and exactly one recommended=true item. For action=ask_user, options must preserve the user's final judgment and allow free-form correction. For action=pass, use neutral fallback options.\n"
         "Set skip_eligible=false for material blockers. Use skip_eligible=true only when the item can be intentionally deferred without changing executor behavior.\n\n"
         f"Context:\n{context}"

@@ -8,8 +8,8 @@ Ouroboros evaluation is a progressive gate:
 - Stage 2: semantic model review against acceptance criteria and goal
 - Stage 3: consensus only when uncertainty or drift requires it
 
-coflow currently has planner bundle review and executor evidence gates.
-When adding stronger evaluation behavior to coflow, prefer mechanical checks and recorded evidence first, then schema-bound model judgment, then user-visible halt or review gates.
+coflow currently has planner bundle validation and executor evidence gates.
+When adding stronger evaluation behavior to coflow, prefer mechanical checks and recorded evidence first, then schema-bound model judgment, then user-visible halt or escalation gates.
 
 ## Evaluation Sources
 
@@ -153,7 +153,7 @@ Important source locations:
 Use this mapping when comparing designs:
 
 - Ouroboros Stage 1 maps to coflow repo-native verification commands and `co.py flow evidence`.
-- Ouroboros Stage 2 maps to coflow Codex CLI bundle reviewers and any future schema-bound evaluator.
+- Ouroboros Stage 2 maps to future coflow schema-bound evaluators, not the current planner path.
 - Ouroboros Stage 3 maps to a future coflow consensus or escalation gate, not to current required behavior.
 - Ouroboros drift and uncertainty triggers map to coflow halt conditions or planner review failures when they affect user-visible contract.
 

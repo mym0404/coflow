@@ -21,6 +21,7 @@ description: active plan bundle의 current task를 `co.py flow`로 실행하는 
 - 실패 후 수정이 필요하면 현재 task 범위 안에서만 고친다.
 - Task 선택, task 완료, 다음 task, halt, finish는 `co.py flow`가 `root_action`으로 알려준다.
 - Bundle YAML file은 CLI가 쓰는 실행 상태다. Root agent가 직접 수정하지 않는다.
+- `co.py` 커맨드가 길게 실행되는 동안에는 새 root boundary, 실패, 사용자 입력 필요 상태가 나오기 전까지 반복 진행 보고 없이 기다린다.
 
 ## Flow Stdout
 

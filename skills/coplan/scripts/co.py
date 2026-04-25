@@ -10,16 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from co.agents import (
-    REQUIRED_REVIEWERS,
     ask_next,
     bundle_author,
     closure_auditor,
-    contract_reviewer,
     score as score_agent,
     seed_architect,
     seed_feedback,
     seed_reviser,
-    verification_reviewer,
 )
 from co.agents.spawn import (
     CODEX_AGENT_DEFAULT_MODEL,
@@ -27,7 +24,6 @@ from co.agents.spawn import (
     CODEX_AGENT_REASONING_EFFORT,
 )
 from co.agents.spawn import run_codex_agent as spawn_codex_agent
-from co.agents.spawn import run_codex_agents_parallel as spawn_codex_agents_parallel
 from co.shared.errors import ExError, GateError
 
 
@@ -46,8 +42,6 @@ VALID_PHASES = {
     "complete",
 }
 TASK_STATES = {"Todo", "Doing", "Done"}
-REVIEW_STATUSES = {"not_run", "passed", "failed"}
-REVIEW_STAGES = {"bundle"}
 INTERVIEW_STATUSES = {"open", "closed"}
 INTERVIEW_TRACK_STATUSES = {"open", "closed"}
 SEED_REVIEW_STATUSES = {"not_presented", "presented", "approved"}
@@ -107,6 +101,21 @@ INTERVIEW_SOURCE_PREFIXES = {
     "user_decision": ("from-user",),
     "code_plus_decision": ("from-user",),
 }
+REPO_CONTEXT_IMPORTANT_PATHS = (
+    "AGENTS.md",
+    ".agents/knowledge/runtime.md",
+    ".agents/knowledge/verification.md",
+    ".agents/knowledge/semantic-verification.md",
+    "skills/coplan/scripts/co.py",
+    "skills/coplan/scripts/co/agents",
+    "skills/coplan/SKILL.md",
+    "skills/coexec/SKILL.md",
+)
+REPO_NATIVE_VERIFICATION_COMMANDS = (
+    "python3 -m compileall -q skills/coplan/scripts/co.py skills/coplan/scripts/co",
+    "skills/coplan/scripts/co.py --help",
+    "skills/coplan/scripts/co.py flow --help",
+)
 AMBIGUITY_THRESHOLD = 0.2
 AMBIGUITY_SCORING_TEMPERATURE_INTENT = 0.1
 AMBIGUITY_WEIGHTS = {
@@ -253,6 +262,165 @@ def hash_text(value):
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def repo_relative_path(value, label):
+    if not isinstance(value, str) or not value.strip():
+        raise ExError(f"{label} path must be a non-empty string")
+    path = Path(value)
+    if path.is_absolute() or ".." in path.parts:
+        raise ExError(f"{label} path must be repo-root-relative")
+    return path
+
+
+def repo_path_status(path_value):
+    path = Path(path_value)
+    if path.is_dir():
+        kind = "dir"
+    elif path.is_file():
+        kind = "file"
+    else:
+        kind = "missing"
+    return {"path": str(path), "exists": kind != "missing", "kind": kind}
+
+
+def build_repo_context_pack():
+    return {
+        "repo_root": str(Path.cwd()),
+        "summary": "coflow ships coplan/coexec Codex skills and a repo-local co.py flow manager.",
+        "important_paths": [repo_path_status(path) for path in REPO_CONTEXT_IMPORTANT_PATHS],
+        "knowledge_routes": [
+            repo_path_status(path)
+            for path in (
+                ".agents/knowledge/index.md",
+                ".agents/knowledge/runtime.md",
+                ".agents/knowledge/verification.md",
+                ".agents/knowledge/semantic-verification.md",
+            )
+        ],
+        "verification_commands": list(REPO_NATIVE_VERIFICATION_COMMANDS),
+        "responsibility_boundaries": [
+            "co.py owns bundle state, validation, gates, bundle freshness, and root_action selection.",
+            "private Codex subagents return bounded JSON judgments and do not edit files.",
+            "root agent stays a thin adapter that follows root_action instead of interpreting internal state.",
+        ],
+    }
+
+
+def source_line_hash(path, line):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for current, text in enumerate(handle, start=1):
+                if current == line:
+                    return hash_text(text.rstrip("\n"))
+    except OSError as exc:
+        raise ExError(f"cannot read source ref {path}: {exc}") from exc
+    raise ExError(f"source ref line is out of range: {path}:{line}")
+
+
+def validate_source_refs(source_refs, label, *, required=False):
+    if source_refs is None:
+        source_refs = []
+    if not isinstance(source_refs, list):
+        raise ExError(f"{label} source_refs must be a list")
+    if required and not source_refs:
+        raise ExError(f"{label} source_refs must include at least one code reference")
+    normalized = []
+    for index, ref in enumerate(source_refs, start=1):
+        ref_label = f"{label} source_refs[{index}]"
+        if not isinstance(ref, dict):
+            raise ExError(f"{ref_label} must be a mapping")
+        require_fields(ref, ["path", "line", "claim"], ref_label)
+        path = repo_relative_path(ref["path"], ref_label)
+        if not path.is_file():
+            raise ExError(f"{ref_label} path must exist and be a file")
+        line = ref["line"]
+        if not isinstance(line, int) or line < 1:
+            raise ExError(f"{ref_label} line must be a positive integer")
+        claim = ref["claim"]
+        if not isinstance(claim, str) or not claim.strip():
+            raise ExError(f"{ref_label} claim must be a non-empty string")
+        source_line_hash(path, line)
+        normalized.append({"path": str(path), "line": line, "claim": claim.strip()})
+    return normalized
+
+
+def validate_repo_inspection(value, label):
+    if not isinstance(value, dict):
+        raise ExError(f"{label} must be a mapping")
+    require_fields(value, ["files_read", "commands_considered", "grounding_summary"], label)
+    files_read = value["files_read"]
+    commands = value["commands_considered"]
+    summary = value["grounding_summary"]
+    if not isinstance(files_read, list) or not files_read:
+        raise ExError(f"{label}.files_read must be a non-empty list")
+    if not isinstance(commands, list) or not commands:
+        raise ExError(f"{label}.commands_considered must be a non-empty list")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ExError(f"{label}.grounding_summary must be a non-empty string")
+    normalized_files = []
+    for index, item in enumerate(files_read, start=1):
+        path = repo_relative_path(item, f"{label}.files_read[{index}]")
+        if not path.is_file():
+            raise ExError(f"{label}.files_read[{index}] must exist and be a file")
+        normalized_files.append(str(path))
+    normalized_commands = []
+    for index, command in enumerate(commands, start=1):
+        if not isinstance(command, str) or not command.strip():
+            raise ExError(f"{label}.commands_considered[{index}] must be a non-empty string")
+        normalized_commands.append(command.strip())
+    return {
+        "files_read": normalized_files,
+        "commands_considered": normalized_commands,
+        "grounding_summary": summary.strip(),
+    }
+
+
+def file_content_hash(path_value):
+    path = Path(path_value)
+    if not path.is_file():
+        return {"path": str(path), "exists": False, "hash": None}
+    return {
+        "path": str(path),
+        "exists": True,
+        "hash": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+    }
+
+
+def source_refs_fingerprint_payload(source_refs):
+    payload = []
+    for ref in source_refs or []:
+        if not isinstance(ref, dict):
+            continue
+        path_value = ref.get("path")
+        line = ref.get("line")
+        if not isinstance(path_value, str) or not isinstance(line, int):
+            continue
+        path = Path(path_value)
+        line_hash = source_line_hash(path, line) if path.is_file() and line >= 1 else None
+        payload.append(
+            {
+                "path": path_value,
+                "line": line,
+                "claim": ref.get("claim"),
+                "line_hash": line_hash,
+            }
+        )
+    return payload
+
+
+def repo_inspection_fingerprint_payload(repo_inspection):
+    if not isinstance(repo_inspection, dict):
+        return repo_inspection
+    payload = {}
+    for key, value in repo_inspection.items():
+        if key == "files_read" and isinstance(value, list):
+            payload[key] = [file_content_hash(path) for path in value]
+        elif isinstance(value, dict):
+            payload[key] = repo_inspection_fingerprint_payload(value)
+        else:
+            payload[key] = value
+    return payload
+
+
 def flow_log_path(plan_dir):
     return plan_dir / FLOW_LOG_FILE
 
@@ -334,8 +502,6 @@ def summarize_agent_output(role, output):
         seed_architect.ROLE: seed_architect.summarize,
         seed_reviser.ROLE: seed_reviser.summarize,
         bundle_author.ROLE: bundle_author.summarize,
-        contract_reviewer.ROLE: contract_reviewer.summarize,
-        verification_reviewer.ROLE: verification_reviewer.summarize,
         seed_feedback.ROLE: seed_feedback.summarize,
     }
     summarize = summarizers.get(role)
@@ -349,17 +515,6 @@ def run_codex_agent(role, prompt, schema, *, cwd=None, plan_dir=None):
         role,
         prompt,
         schema,
-        cwd=cwd,
-        plan_dir=plan_dir,
-        append_flow_log=append_flow_log,
-        hash_text=hash_text,
-        summarize_output=summarize_agent_output,
-    )
-
-
-def run_codex_agents_parallel(agent_specs, *, cwd=None, plan_dir=None):
-    return spawn_codex_agents_parallel(
-        agent_specs,
         cwd=cwd,
         plan_dir=plan_dir,
         append_flow_log=append_flow_log,
@@ -673,6 +828,14 @@ def validate_interview(data):
             raise ExError(
                 f"interview round {round_item['id']} source must match route {round_item['route']}"
             )
+        source_refs = round_item.get("source_refs", [])
+        normalized_source_refs = validate_source_refs(
+            source_refs,
+            f"interview round {round_item['id']}",
+            required=round_item["route"] == "code_fact",
+        )
+        if source_refs:
+            round_item["source_refs"] = normalized_source_refs
     pending = data["pending_user_question"]
     if pending is not None:
         if not isinstance(pending, dict):
@@ -1058,7 +1221,7 @@ def validate_expected_evidence_path(value, label):
 
 def bundle_validation_feedback(exc):
     return (
-        "The authored bundle failed local validation before review. "
+        "The authored bundle failed local validation. "
         f"Fix this exact validation error and return a complete corrected bundle: {exc}"
     )
 
@@ -1134,6 +1297,7 @@ def build_planning_context(plan_id, plan_dir, title, interview):
                 "question": item.get("question"),
                 "answer": item.get("answer"),
                 "source": item.get("source"),
+                "source_refs": item.get("source_refs", []),
                 "purpose": item.get("purpose"),
             }
             for item in rounds
@@ -1153,6 +1317,7 @@ def build_planning_context(plan_id, plan_dir, title, interview):
                     "question": item.get("question"),
                     "answer": item.get("answer"),
                     "source": item.get("source"),
+                    "source_refs": item.get("source_refs", []),
                     "purpose": item.get("purpose"),
                 }
             )
@@ -1183,6 +1348,7 @@ def build_planning_context(plan_id, plan_dir, title, interview):
         "completion_candidate_streak": interview.get("completion_candidate_streak", 0),
         "closure_audit": interview.get("closure_audit", default_closure_audit()),
         "plan_seed": load_plan_seed(plan_dir) if (plan_dir / "plan_seed.yaml").exists() else None,
+        "repo_context_pack": build_repo_context_pack(),
         "coverage": coverage,
         "ambiguity": {
             "ready": latest.get("ready") is True,
@@ -1199,37 +1365,19 @@ def build_planning_context(plan_id, plan_dir, title, interview):
     }
 
 
-def default_review_state():
-    return {
-        "status": "not_run",
-        "stage": "bundle",
-        "required_reviewers": list(REQUIRED_REVIEWERS),
-        "passed_reviewers": [],
-        "last_run_id": None,
-        "fingerprint": None,
-    }
-
-
 def validate_status(data, tasks_data=None):
-    require_fields(data, ["phase", "review", "current_task", "tasks", "halt"], "status.yaml")
+    data.setdefault("bundle_inspection", default_bundle_inspection())
+    require_fields(data, ["phase", "current_task", "tasks", "halt", "bundle_inspection"], "status.yaml")
     if data["phase"] not in VALID_PHASES:
         raise ExError(f"invalid phase: {data['phase']}")
-    review = data["review"]
-    if not isinstance(review, dict):
-        raise ExError("status.yaml review must be a mapping")
-    require_fields(
-        review,
-        ["status", "stage", "required_reviewers", "passed_reviewers", "last_run_id", "fingerprint"],
-        "status.yaml review",
-    )
-    if review["status"] not in REVIEW_STATUSES:
-        raise ExError("status.yaml review.status must be not_run, passed, or failed")
-    if review["stage"] not in REVIEW_STAGES:
-        raise ExError("status.yaml review.stage must be bundle")
-    if review["required_reviewers"] != list(REQUIRED_REVIEWERS):
-        raise ExError("status.yaml review.required_reviewers must match required reviewers")
-    if not isinstance(review["passed_reviewers"], list):
-        raise ExError("status.yaml review.passed_reviewers must be a list")
+    bundle_inspection = data["bundle_inspection"]
+    if not isinstance(bundle_inspection, dict):
+        raise ExError("status.yaml bundle_inspection must be a mapping")
+    bundle_inspection.setdefault("author", None)
+    if bundle_inspection["author"] is not None:
+        validate_repo_inspection(bundle_inspection["author"], "status.yaml bundle_inspection.author")
+    if not isinstance(data["tasks"], dict):
+        raise ExError("status.yaml tasks must be a mapping")
     for task_id, state in data["tasks"].items():
         if state not in TASK_STATES:
             raise ExError(f"invalid task state for {task_id}: {state}")
@@ -1265,12 +1413,43 @@ def sync_status_tasks(plan_dir, tasks_data):
     write_yaml(plan_dir / "status.yaml", status)
 
 
-def review_fingerprint(plan_dir):
+def interview_code_fact_source_refs(interview):
+    refs = []
+    for round_item in interview.get("rounds", []):
+        if isinstance(round_item, dict) and round_item.get("route") == "code_fact":
+            refs.extend(round_item.get("source_refs", []))
+    return refs
+
+
+def default_bundle_inspection():
+    return {"author": None}
+
+
+def current_bundle_inspection(plan_dir, override=None):
+    if override is not None:
+        return override
+    try:
+        status = load_yaml(plan_dir / "status.yaml")
+        return status.get("bundle_inspection", default_bundle_inspection())
+    except ExError:
+        return default_bundle_inspection()
+
+
+def plan_bundle_fingerprint(plan_dir, bundle_inspection=None):
     interview = load_yaml(plan_dir / "interview.yaml")
+    repo_context_pack = build_repo_context_pack()
+    inspection_payload = repo_inspection_fingerprint_payload(
+        current_bundle_inspection(plan_dir, bundle_inspection)
+    )
     payload = {
         "tasks": load_yaml(plan_dir / "tasks.yaml"),
         "interview_contract": interview_contract_payload(interview),
         "plan_seed": load_plan_seed(plan_dir) if (plan_dir / "plan_seed.yaml").exists() else None,
+        "repo_context_pack_hash": hash_text(dump_json(repo_context_pack)),
+        "repo_inspection_hash": hash_text(dump_json(inspection_payload)),
+        "code_fact_source_refs": source_refs_fingerprint_payload(
+            interview_code_fact_source_refs(interview)
+        ),
     }
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -1371,20 +1550,13 @@ def plan_seed_is_current(plan_dir, interview=None):
     )
 
 
-def require_review_passed(plan_dir, status, action):
-    review = status.get("review", {})
-    if review.get("status") != "passed":
-        raise ExError(f"{action} requires bundle review PASS")
-    current_fingerprint = review_fingerprint(plan_dir)
-    if review.get("fingerprint") != current_fingerprint:
-        raise ExError(f"{action} requires fresh bundle review PASS")
-
-
-def reset_review_status(plan_dir):
-    status = load_yaml(plan_dir / "status.yaml")
-    status["review"] = default_review_state()
-    validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
-    write_yaml(plan_dir / "status.yaml", status)
+def require_presented_seed_current(plan_dir, action):
+    interview = load_yaml(plan_dir / "interview.yaml")
+    seed_review = interview.get("seed_review", {})
+    if seed_review.get("status") not in {"presented", "approved"}:
+        raise ExError(f"{action} requires presented plan seed")
+    if seed_review.get("fingerprint") != plan_bundle_fingerprint(plan_dir):
+        raise ExError(f"{action} requires current plan seed bundle")
 
 
 def reset_seed_review_state(plan_dir, preserve_feedback=False):
@@ -1407,7 +1579,7 @@ def mark_seed_review_presented(plan_dir):
     interview = load_yaml(plan_dir / "interview.yaml")
     seed_review = interview.setdefault("seed_review", {})
     seed_review["status"] = "presented"
-    seed_review["fingerprint"] = review_fingerprint(plan_dir)
+    seed_review["fingerprint"] = plan_bundle_fingerprint(plan_dir)
     seed_review.setdefault("comment", "")
     seed_review.setdefault("feedback", [])
     validate_interview(interview)
@@ -1418,7 +1590,7 @@ def mark_seed_review_approved(plan_dir, comment):
     interview = load_yaml(plan_dir / "interview.yaml")
     seed_review = interview.setdefault("seed_review", {})
     seed_review["status"] = "approved"
-    seed_review["fingerprint"] = review_fingerprint(plan_dir)
+    seed_review["fingerprint"] = plan_bundle_fingerprint(plan_dir)
     seed_review["comment"] = comment or "Plan seed approved."
     seed_review.setdefault("feedback", [])
     validate_interview(interview)
@@ -1438,17 +1610,10 @@ def append_seed_review_feedback(plan_dir, feedback, classification):
         }
     )
     seed_review["status"] = "presented"
-    seed_review["fingerprint"] = review_fingerprint(plan_dir)
+    seed_review["fingerprint"] = plan_bundle_fingerprint(plan_dir)
     seed_review.setdefault("comment", "")
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
-
-
-def next_review_run_id(status):
-    raw = str(status.get("review", {}).get("last_run_id") or "")
-    if raw.startswith("R") and raw[1:].isdigit():
-        return f"R{int(raw[1:]) + 1}"
-    return "R1"
 
 
 def status_groups(bundle):
@@ -2017,10 +2182,10 @@ def init_plan(plan_id, title, initial_context=""):
         plan_dir / "status.yaml",
         {
             "phase": "planning",
-            "review": default_review_state(),
             "current_task": None,
             "tasks": {},
             "halt": None,
+            "bundle_inspection": default_bundle_inspection(),
         },
     )
     write_yaml(plan_dir / "notes.yaml", {"entries": []})
@@ -2047,7 +2212,7 @@ def non_user_streak_question(interview):
     return None
 
 
-def record_interview_round(plan_dir, *, route, track, question, answer, source):
+def record_interview_round(plan_dir, *, route, track, question, answer, source, source_refs=None):
     interview = load_yaml(plan_dir / "interview.yaml")
     validate_interview(interview)
     if interview.get("status") == "closed":
@@ -2059,9 +2224,6 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
         and route not in INTERVIEW_USER_ROUTES
     ):
         raise ExError("next interview answer must require user judgment after 3 non-user answers")
-    focus_blocker = interview_focus_blocker(interview, track)
-    if focus_blocker:
-        raise ExError(focus_blocker)
     pending = interview.get("pending_user_question")
     if route in INTERVIEW_USER_ROUTES:
         if pending is None:
@@ -2074,9 +2236,17 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
     else:
         if pending is not None:
             raise ExError("record the pending user answer before adding non-user interview facts")
+        focus_blocker = interview_focus_blocker(interview, track)
+        if focus_blocker:
+            raise ExError(focus_blocker)
         round_id = next_id(interview.get("rounds", []), "Q")
         purpose = None
         skip_kind = None
+    normalized_source_refs = validate_source_refs(
+        source_refs,
+        f"interview round {round_id}",
+        required=route == "code_fact",
+    )
     round_item = {
         "id": round_id,
         "route": route,
@@ -2085,6 +2255,8 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
         "answer": answer,
         "source": source,
     }
+    if normalized_source_refs:
+        round_item["source_refs"] = normalized_source_refs
     if purpose:
         round_item["purpose"] = purpose
     if skip_kind and is_deferred_answer(answer):
@@ -2119,7 +2291,6 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
     }
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
-    reset_review_status(plan_dir)
     append_flow_log(
         plan_dir,
         "interview.answer.recorded",
@@ -2127,6 +2298,7 @@ def record_interview_round(plan_dir, *, route, track, question, answer, source):
         route=route,
         track=track,
         source=source,
+        source_ref_count=len(normalized_source_refs),
         question_hash=hash_text(question),
         answer_hash=hash_text(answer),
         answer_bytes=len(str(answer).encode("utf-8")),
@@ -2180,7 +2352,6 @@ def score_interview_internal(plan_dir, mode="auto"):
     }
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
-    reset_review_status(plan_dir)
     append_flow_log(
         plan_dir,
         "interview.score",
@@ -2237,7 +2408,6 @@ def run_closure_audit_internal(plan_dir):
     interview["closure"]["material_blockers"] = list(output.get("material_blockers", []))
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
-    reset_review_status(plan_dir)
     append_flow_log(
         plan_dir,
         "interview.closure_audit",
@@ -2288,7 +2458,6 @@ def write_plan_seed_internal(plan_dir):
     }
     validate_plan_seed(plan_seed)
     write_yaml(plan_dir / "plan_seed.yaml", plan_seed)
-    reset_review_status(plan_dir)
     reset_seed_review_state(plan_dir)
     append_flow_log(
         plan_dir,
@@ -2323,7 +2492,6 @@ def revise_plan_seed_internal(plan_dir, feedback):
     }
     validate_plan_seed(plan_seed)
     write_yaml(plan_dir / "plan_seed.yaml", plan_seed)
-    reset_review_status(plan_dir)
     reset_seed_review_state(plan_dir, preserve_feedback=True)
     append_flow_log(
         plan_dir,
@@ -2367,7 +2535,6 @@ def close_interview_if_ready(plan_dir):
     interview["closure"]["summary"] = summary
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
-    reset_review_status(plan_dir)
     append_flow_log(
         plan_dir,
         "interview.closed",
@@ -2431,6 +2598,7 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
                     question=output["question"],
                     answer=output["answer"],
                     source=output["source"],
+                    source_refs=output.get("source_refs"),
                 )
                 continue
             pending = create_pending_question(
@@ -2517,6 +2685,7 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
                 question=output["question"],
                 answer=output["answer"],
                 source=output["source"],
+                source_refs=output.get("source_refs"),
             )
             continue
         if output["action"] == "ready_for_score":
@@ -2531,14 +2700,24 @@ def write_authored_bundle(plan_dir, output):
     tasks = output.get("tasks")
     if not isinstance(tasks, dict):
         raise ExError("bundle_author must return tasks mapping")
+    repo_inspection = validate_repo_inspection(
+        output.get("repo_inspection"),
+        "bundle_author repo_inspection",
+    )
     validate_tasks(tasks)
     write_yaml(plan_dir / "tasks.yaml", tasks)
     sync_status_tasks(plan_dir, tasks)
-    reset_review_status(plan_dir)
+    status = load_yaml(plan_dir / "status.yaml")
+    status["bundle_inspection"] = {"author": repo_inspection}
+    validate_status(status, tasks)
+    write_yaml(plan_dir / "status.yaml", status)
     append_flow_log(
         plan_dir,
         "bundle.authored",
         tasks_hash=hash_text(dump_json(tasks)),
+        repo_inspection_hash=hash_text(
+            dump_json(repo_inspection_fingerprint_payload(repo_inspection))
+        ),
         task_count=len(tasks.get("tasks", [])) if isinstance(tasks.get("tasks"), list) else None,
     )
 
@@ -2555,105 +2734,11 @@ def validate_bundle_internal(plan_dir):
     validate_status(status, tasks)
 
 
-def run_review_internal(plan_dir):
-    validate_bundle_internal(plan_dir)
-    tasks = load_yaml(plan_dir / "tasks.yaml")
-    status = load_yaml(plan_dir / "status.yaml")
-    reviewer_outputs = run_codex_agents_parallel(
-        [
-            {
-                "role": reviewer,
-                "prompt": (
-                    contract_reviewer.prompt(context=agent_context(plan_dir))
-                    if reviewer == contract_reviewer.ROLE
-                    else verification_reviewer.prompt(context=agent_context(plan_dir))
-                ),
-                "schema": (
-                    contract_reviewer.schema()
-                    if reviewer == contract_reviewer.ROLE
-                    else verification_reviewer.schema()
-                ),
-            }
-            for reviewer in REQUIRED_REVIEWERS
-        ],
-        cwd=Path.cwd(),
-        plan_dir=plan_dir,
-    )
-    results = []
-    passed_reviewers = []
-    for reviewer in REQUIRED_REVIEWERS:
-        result = reviewer_outputs[reviewer]["output"]
-        review_status = result["status"]
-        if review_status == "PASS":
-            passed_reviewers.append(reviewer)
-        results.append({"reviewer": reviewer, **result})
-        append_flow_log(
-            plan_dir,
-            "review.result",
-            role=reviewer,
-            status=review_status,
-            issue_count=len(result.get("issues", [])) if isinstance(result.get("issues"), list) else None,
-        )
-        append_note(
-            plan_dir,
-            "decision" if review_status == "PASS" else "risk",
-            f"{reviewer} {review_status}: {result['summary']}",
-            "Codex CLI bundle review.",
-            ["plan_seed.yaml", "tasks.yaml"],
-            f"{CLI_COMMAND_NAME} flow next",
-        )
-    previous_status = status
-    status = load_yaml(plan_dir / "status.yaml")
-    status["review"] = {
-        **default_review_state(),
-        "status": "passed" if len(passed_reviewers) == len(REQUIRED_REVIEWERS) else "failed",
-        "stage": "bundle",
-        "required_reviewers": list(REQUIRED_REVIEWERS),
-        "passed_reviewers": passed_reviewers,
-        "last_run_id": next_review_run_id(previous_status),
-        "fingerprint": review_fingerprint(plan_dir) if len(passed_reviewers) == len(REQUIRED_REVIEWERS) else None,
-    }
-    validate_status(status, tasks)
-    write_yaml(plan_dir / "status.yaml", status)
-    append_flow_log(
-        plan_dir,
-        "review.join",
-        status=status["review"]["status"],
-        passed_reviewers=passed_reviewers,
-        required_reviewers=list(REQUIRED_REVIEWERS),
-    )
-    return {"review": status["review"], "results": results}
-
-
-def review_followup_question(review_results):
-    for result in review_results or []:
-        issues = result.get("issues") if isinstance(result, dict) else None
-        if isinstance(issues, list) and issues:
-            issue = str(issues[0]).strip()
-            reviewer = str(result.get("reviewer", "reviewer"))
-            track = "verification" if "verification" in reviewer else "constraints"
-            return {
-                "track": track,
-                "question": (
-                    "Bundle review could not resolve this seed conflict without user intent: "
-                    f"{issue} What should the approved plan contract say?"
-                ),
-            }
-    return {
-        "track": "constraints",
-        "question": (
-            "Bundle review found a plan_seed conflict that the author could not repair. "
-            "What user-facing contract should take precedence?"
-        ),
-    }
-
-
-def author_and_review_until_boundary(plan_dir, feedback=None):
+def author_bundle_until_boundary(plan_dir, feedback=None):
     interview = load_yaml(plan_dir / "interview.yaml")
     validate_interview(interview)
     if not plan_seed_is_current(plan_dir, interview):
         raise ExError("bundle authoring requires a current plan_seed.yaml")
-    review_results = None
     validation_feedback = None
     for _ in range(3):
         author_feedback = "\n".join(item for item in [feedback, validation_feedback] if item)
@@ -2661,9 +2746,7 @@ def author_and_review_until_boundary(plan_dir, feedback=None):
             bundle_author.ROLE,
             bundle_author.prompt(
                 context=agent_context(plan_dir),
-                review_results=review_results,
                 feedback=author_feedback,
-                dump_json=dump_json,
             ),
             bundle_author.schema(),
             cwd=Path.cwd(),
@@ -2680,58 +2763,34 @@ def author_and_review_until_boundary(plan_dir, feedback=None):
             )
             continue
         validation_feedback = None
-        review = run_review_internal(plan_dir)
-        if review["review"]["status"] == "passed":
-            status = load_yaml(plan_dir / "status.yaml")
-            previous_phase = status.get("phase")
-            status["phase"] = "seed_review"
-            validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
-            write_yaml(plan_dir / "status.yaml", status)
-            mark_seed_review_presented(plan_dir)
-            append_flow_log(
-                plan_dir,
-                "state.transition",
-                file="status.yaml",
-                field="phase",
-                previous=previous_phase,
-                current="seed_review",
-                reason="review_passed",
-            )
-            return {
-                "review": review["review"],
-                "author_summary": output.get("summary", ""),
-                "root_action": present_plan_seed_action(plan_dir),
-            }
-        review_results = review["results"]
-    interview = load_yaml(plan_dir / "interview.yaml")
-    interview["status"] = "open"
-    interview["closure"]["ready"] = False
-    interview["closure"]["summary"] = ""
-    interview["closure_audit"] = default_closure_audit()
-    write_yaml(plan_dir / "interview.yaml", interview)
-    reset_review_status(plan_dir)
-    followup = review_followup_question(review_results)
-    interview = load_yaml(plan_dir / "interview.yaml")
-    interview["required_tracks"][followup["track"]]["status"] = "open"
-    write_yaml(plan_dir / "interview.yaml", interview)
-    pending = create_pending_question(
-        plan_dir,
-        load_yaml(plan_dir / "interview.yaml"),
-        "user_decision",
-        followup["track"],
-        followup["question"],
-        enforce_focus=False,
-    )
-    return {"review_results": review_results, "root_action": ask_user_action(pending)}
+        status = load_yaml(plan_dir / "status.yaml")
+        previous_phase = status.get("phase")
+        status["phase"] = "seed_review"
+        validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
+        write_yaml(plan_dir / "status.yaml", status)
+        mark_seed_review_presented(plan_dir)
+        append_flow_log(
+            plan_dir,
+            "state.transition",
+            file="status.yaml",
+            field="phase",
+            previous=previous_phase,
+            current="seed_review",
+            reason="bundle_authored",
+        )
+        return {
+            "author_summary": output.get("summary", ""),
+            "root_action": present_plan_seed_action(plan_dir),
+        }
+    raise ExError("bundle_author failed local validation after 3 attempts")
 
 
 def planner_needs_authoring(plan_dir):
-    status = load_yaml(plan_dir / "status.yaml")
-    if status.get("review", {}).get("status") != "passed":
+    tasks = load_yaml(plan_dir / "tasks.yaml")
+    if not tasks.get("tasks"):
         return True
     try:
         validate_bundle_internal(plan_dir)
-        require_review_passed(plan_dir, status, "flow")
     except ExError:
         return True
     return False
@@ -2743,7 +2802,7 @@ def approve_and_finalize(plan_dir, comment):
     status = load_yaml(plan_dir / "status.yaml")
     if status.get("phase") != "seed_review":
         raise ExError("plan seed approval requires seed_review phase")
-    require_review_passed(plan_dir, status, "plan seed approval")
+    require_presented_seed_current(plan_dir, "plan seed approval")
     previous_phase = status.get("phase")
     status["phase"] = "ready_for_exec"
     validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
@@ -2770,7 +2829,7 @@ def approve_and_finalize(plan_dir, comment):
     status = load_yaml(plan_dir / "status.yaml")
     validate_tasks(tasks)
     validate_status(status, tasks)
-    require_review_passed(plan_dir, status, "flow finalize")
+    require_presented_seed_current(plan_dir, "flow finalize")
 
 
 def classify_seed_feedback(plan_dir, feedback):
@@ -2820,7 +2879,7 @@ def apply_seed_feedback(plan_dir, feedback):
             f"{CLI_COMMAND_NAME} flow respond",
         )
         revise_plan_seed_internal(plan_dir, feedback)
-        result = author_and_review_until_boundary(plan_dir)
+        result = author_bundle_until_boundary(plan_dir)
         result["feedback"] = classification
         return result
     track = classification["track"]
@@ -2853,7 +2912,6 @@ def apply_seed_feedback(plan_dir, feedback):
         reason="seed_meaning_change_feedback",
     )
     write_yaml(plan_dir / "interview.yaml", interview)
-    reset_review_status(plan_dir)
     pending = create_pending_question(
         plan_dir,
         load_yaml(plan_dir / "interview.yaml"),
@@ -3086,7 +3144,7 @@ def advance_planner_until_boundary(feedback=None):
     if action:
         return {"root_action": action}
     if planner_needs_authoring(plan_dir) or feedback:
-        result = author_and_review_until_boundary(plan_dir, feedback=feedback)
+        result = author_bundle_until_boundary(plan_dir, feedback=feedback)
         return result
     status = load_yaml(plan_dir / "status.yaml")
     previous_phase = status.get("phase")
