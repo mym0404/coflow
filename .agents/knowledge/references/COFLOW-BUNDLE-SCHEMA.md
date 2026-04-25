@@ -115,6 +115,14 @@ Required review state fields under `seed_review`:
 - `comment`
 - `feedback`
 
+Required fields under non-null `pending_user_question`:
+
+- `id`
+- `route`
+- `track`
+- `question`
+- `options`: 2-3 UI choices, each with `label`, `description`, and exactly one `recommended: true`
+
 Required `closure_audit` fields:
 
 - `status`

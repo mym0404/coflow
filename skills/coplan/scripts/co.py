@@ -60,6 +60,8 @@ INTERVIEW_MIN_USER_ROUNDS = 1
 INTERVIEW_COMPLETION_CANDIDATE_STREAK_REQUIRED = 2
 INTERVIEW_CLOSURE_AUDIT_STATUSES = {"not_run", "passed", "failed"}
 INTERVIEW_SKIP_KINDS = {"defer", "decide_later"}
+QUESTION_OPTION_LABEL_MAX = 40
+QUESTION_OPTION_DESCRIPTION_MAX = 160
 INTERVIEW_CLOSURE_CHECKS = (
     "desired_output_explicit",
     "user_tradeoffs_explicit",
@@ -898,7 +900,7 @@ def validate_interview(data):
     if pending is not None:
         if not isinstance(pending, dict):
             raise ExError("interview.yaml pending_user_question must be null or a mapping")
-        require_fields(pending, ["id", "route", "track", "question"], "pending_user_question")
+        require_fields(pending, ["id", "route", "track", "question", "options"], "pending_user_question")
         if pending["route"] not in INTERVIEW_USER_ROUTES:
             raise ExError("pending_user_question route must require user judgment")
         if pending["track"] not in INTERVIEW_REQUIRED_TRACK_SET:
@@ -912,6 +914,8 @@ def validate_interview(data):
         skip_kind = pending.get("skip_kind")
         if skip_kind is not None and skip_kind not in INTERVIEW_SKIP_KINDS:
             raise ExError("pending_user_question skip_kind is invalid")
+        options = pending.get("options", [])
+        validate_question_options(options, "pending_user_question options")
     if not isinstance(data["agent_runs"], list):
         raise ExError("interview.yaml agent_runs must be a list")
     if not isinstance(data["ambiguity_ledger"], list):
@@ -1029,7 +1033,12 @@ def hidden_assumption_followup(latest):
         track = followup.get("track")
         question = str(followup.get("question", "")).strip()
         if route in INTERVIEW_USER_ROUTES and track in INTERVIEW_REQUIRED_TRACK_SET and question:
-            return {"route": route, "track": track, "question": question}
+            return {
+                "route": route,
+                "track": track,
+                "question": question,
+                "options": followup.get("options") or question_options_for_kind(None),
+            }
     return {
         "route": "user_decision",
         "track": "constraints",
@@ -1037,6 +1046,7 @@ def hidden_assumption_followup(latest):
             "Before finalizing this plan, what implementation-changing assumption "
             "about the existing codebase, docs, or product behavior should be settled?"
         ),
+        "options": question_options_for_kind(None),
     }
 
 
@@ -1796,7 +1806,99 @@ def run_interview_codex_agent(plan_dir, interview, role, prompt, schema):
     return result["output"]
 
 
+def question_option_schema():
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "label": {"type": "string", "minLength": 1, "maxLength": QUESTION_OPTION_LABEL_MAX},
+            "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": QUESTION_OPTION_DESCRIPTION_MAX,
+            },
+            "recommended": {"type": "boolean"},
+        },
+        "required": ["label", "description", "recommended"],
+    }
+
+
+def validate_question_options(options, label):
+    if not isinstance(options, list):
+        raise ExError(f"{label} must be a list")
+    if not 2 <= len(options) <= 3:
+        raise ExError(f"{label} must contain 2 or 3 items")
+    recommended_count = 0
+    seen = set()
+    for index, option in enumerate(options):
+        if not isinstance(option, dict):
+            raise ExError(f"{label}[{index}] must be a mapping")
+        require_fields(option, ["label", "description", "recommended"], f"{label}[{index}]")
+        option_label = str(option["label"]).strip()
+        description = str(option["description"]).strip()
+        if not option_label:
+            raise ExError(f"{label}[{index}].label must not be empty")
+        if len(option_label) > QUESTION_OPTION_LABEL_MAX:
+            raise ExError(f"{label}[{index}].label is too long")
+        if option_label in seen:
+            raise ExError(f"{label} labels must be unique")
+        seen.add(option_label)
+        if not description:
+            raise ExError(f"{label}[{index}].description must not be empty")
+        if len(description) > QUESTION_OPTION_DESCRIPTION_MAX:
+            raise ExError(f"{label}[{index}].description is too long")
+        if not isinstance(option["recommended"], bool):
+            raise ExError(f"{label}[{index}].recommended must be true or false")
+        if option["recommended"]:
+            recommended_count += 1
+    if recommended_count != 1:
+        raise ExError(f"{label} must contain exactly one recommended option")
+
+
+def normalize_question_options(options):
+    validate_question_options(options, "question options")
+    normalized = []
+    for option in options:
+        normalized.append(
+            {
+                "label": str(option["label"]).strip(),
+                "description": str(option["description"]).strip(),
+                "recommended": bool(option["recommended"]),
+            }
+        )
+    return normalized
+
+
+def question_options_for_kind(kind):
+    if kind == "defer":
+        return [
+            {
+                "label": "직접 답변",
+                "description": "현재 판단을 직접 입력합니다.",
+                "recommended": True,
+            },
+            {
+                "label": "지금은 보류",
+                "description": "실행 결정을 바꾸지 않는 세부사항이면 보류합니다.",
+                "recommended": False,
+            },
+        ]
+    return [
+        {
+            "label": "직접 답변",
+            "description": "현재 판단을 직접 입력합니다.",
+            "recommended": True,
+        },
+        {
+            "label": "질문 수정 필요",
+            "description": "질문이 의도와 맞지 않음을 답변으로 기록합니다.",
+            "recommended": False,
+        },
+    ]
+
+
 def ask_next_schema():
+    option = question_option_schema()
     return {
         "type": "object",
         "additionalProperties": False,
@@ -1809,6 +1911,12 @@ def ask_next_schema():
             "source": {"type": "string"},
             "skip_eligible": {"type": "boolean"},
             "skip_kind": {"type": "string", "enum": ["defer", "decide_later"]},
+            "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 3,
+                "items": option,
+            },
             "reason": {"type": "string"},
         },
         "required": [
@@ -1820,6 +1928,7 @@ def ask_next_schema():
             "source",
             "skip_eligible",
             "skip_kind",
+            "options",
             "reason",
         ],
     }
@@ -1835,6 +1944,7 @@ def score_schema():
         },
         "required": ["clarity_score", "justification"],
     }
+    option = question_option_schema()
     return {
         "type": "object",
         "additionalProperties": False,
@@ -1864,8 +1974,14 @@ def score_schema():
                     "route": {"type": "string", "enum": sorted(INTERVIEW_USER_ROUTES)},
                     "track": {"type": "string", "enum": list(INTERVIEW_REQUIRED_TRACKS)},
                     "question": {"type": "string"},
+                    "options": {
+                        "type": "array",
+                        "minItems": 2,
+                        "maxItems": 3,
+                        "items": option,
+                    },
                 },
-                "required": ["route", "track", "question"],
+                "required": ["route", "track", "question", "options"],
             },
             "summary": {"type": "string"},
         },
@@ -1874,6 +1990,7 @@ def score_schema():
 
 
 def closure_audit_schema():
+    option = question_option_schema()
     return {
         "type": "object",
         "additionalProperties": False,
@@ -1886,6 +2003,12 @@ def closure_audit_schema():
             "material_blockers": {"type": "array", "items": {"type": "string"}},
             "skip_eligible": {"type": "boolean"},
             "skip_kind": {"type": "string", "enum": ["defer", "decide_later"]},
+            "options": {
+                "type": "array",
+                "minItems": 2,
+                "maxItems": 3,
+                "items": option,
+            },
         },
         "required": [
             "action",
@@ -1896,6 +2019,7 @@ def closure_audit_schema():
             "material_blockers",
             "skip_eligible",
             "skip_kind",
+            "options",
         ],
     }
 
@@ -1957,6 +2081,7 @@ def ask_next_prompt(plan_dir):
         "Brownfield hint: prefer questions about the intended behavioral boundary, source of truth, API/protocol ownership, lifecycle/recovery, migration, or cross-client impact when those could change the implementation.\n"
         "Perspective panel: user-intent guardian asks what outcome changes; maintainer asks what existing behavior must survive; executor asks what static decision it would otherwise have to make; verifier asks what proof is minimally sufficient; Seed Closer asks which unresolved choice would invalidate the plan.\n"
         "Answer prefix guidance: ask concise questions that invite concrete answers like 'Change...', 'Preserve...', 'Exclude...', or 'Prove with...'.\n"
+        "Always populate options with 2-3 concise UI choices and exactly one recommended=true item. For action=ask_user, options must not decide for the user; they should offer useful answer directions plus room for free-form correction. For other actions, use neutral fallback options.\n"
         "Set skip_eligible=true only for useful details that can be intentionally deferred without changing the plan contract; set skip_eligible=false for material implementation decisions. Use skip_kind=defer for optional detail and decide_later for explicit future decisions.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
     )
@@ -1968,6 +2093,7 @@ def score_prompt(plan_dir, project_mode):
         "Score goal_clarity, constraint_clarity, success_criteria_clarity, and context_clarity. For greenfield, still provide context_clarity but it will not be weighted.\n"
         f"Requested project_mode: {project_mode}.\n"
         "Treat intentional deferrals in deferred_items as settled unless they would force the executor to choose behavior, ownership, migration, or verification policy. Set recommended_followup to the single best question for exposing a user-owned tradeoff or brownfield context gap before execution. For brownfield work with weak context_clarity, prefer a repository-specific code/docs/behavior boundary question.\n"
+        "recommended_followup must include options with 2-3 concise UI choices and exactly one recommended=true item. Options must help the user answer, not make hidden planning decisions.\n"
         "Do not declare readiness in prose; the CLI will compute weighted clarity and ambiguity.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
     )
@@ -1978,6 +2104,7 @@ def closure_audit_prompt(plan_dir):
         "You are the coplan closure_auditor using Seed Closer criteria. Decide only whether the interview is ready for plan_seed extraction and bundle authoring. Return JSON only.\n"
         "A low ambiguity score is not sufficient. PASS only when no implementation-changing decision remains for ownership/source of truth, API/protocol, lifecycle/recovery, migration, cross-client impact, execution boundaries, or verification expectations.\n"
         "If any material decision remains, action=ask_user and ask exactly one highest-impact follow-up. Do not ask about planning mechanics, bundle files, reviewer setup, or validation process unless the user's task is specifically about those systems.\n"
+        "Always populate options with 2-3 concise UI choices and exactly one recommended=true item. For action=ask_user, options must preserve the user's final judgment and allow free-form correction. For action=pass, use neutral fallback options.\n"
         "Set skip_eligible=false for material blockers. Use skip_eligible=true only when the item can be intentionally deferred without changing executor behavior.\n\n"
         f"Context:\n{agent_context(plan_dir)}"
     )
@@ -2032,6 +2159,7 @@ def create_pending_question(
     enforce_focus=True,
     skip_eligible=False,
     skip_kind=None,
+    options=None,
 ):
     if interview.get("status") == "closed":
         raise ExError("interview is closed; reopen a track before asking more questions")
@@ -2055,6 +2183,9 @@ def create_pending_question(
         "track": track,
         "question": question,
         "skip_eligible": bool(skip_eligible),
+        "options": normalize_question_options(
+            options or question_options_for_kind(skip_kind if skip_eligible else None)
+        ),
     }
     if purpose:
         pending["purpose"] = purpose
@@ -2072,6 +2203,7 @@ def create_pending_question(
         purpose=purpose,
         skip_eligible=bool(skip_eligible),
         skip_kind=skip_kind,
+        option_count=len(pending["options"]),
         question_hash=hash_text(question),
         question_bytes=len(question.encode("utf-8")),
     )
@@ -2282,6 +2414,7 @@ def ask_user_action(pending):
     action = {
         "type": "ask_user",
         "question": pending["question"],
+        "options": pending["options"],
         "response_command": f"{CLI_COMMAND_NAME} flow respond --stdin",
     }
     if pending.get("skip_eligible"):
@@ -2592,6 +2725,7 @@ def run_closure_audit_internal(plan_dir):
             enforce_focus=False,
             skip_eligible=output.get("skip_eligible") is True,
             skip_kind=output.get("skip_kind"),
+            options=output.get("options"),
         )
         return {"root_action": ask_user_action(pending)}
     return {"audit": audit}
@@ -2727,6 +2861,7 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
                 question["route"],
                 question["track"],
                 question["question"],
+                options=question.get("options"),
             )
             return ask_user_action(pending)
         if interview_answered_round_count(interview) < INTERVIEW_MIN_TOTAL_ROUNDS:
@@ -2747,6 +2882,7 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
                     output["question"],
                     skip_eligible=output.get("skip_eligible") is True,
                     skip_kind=output.get("skip_kind"),
+                    options=output.get("options"),
                 )
                 return ask_user_action(pending)
             if output["action"] == "record_fact":
@@ -2790,6 +2926,7 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
                 followup["track"],
                 followup["question"],
                 enforce_focus=False,
+                options=followup.get("options"),
             )
             return ask_user_action(pending)
         interview = load_yaml(plan_dir / "interview.yaml")
@@ -2827,6 +2964,7 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
                 output["question"],
                 skip_eligible=output.get("skip_eligible") is True,
                 skip_kind=output.get("skip_kind"),
+                options=output.get("options"),
             )
             return ask_user_action(pending)
         if output["action"] == "record_fact":

@@ -16,7 +16,7 @@ description: 사용자 요청을 `co.py flow`로 실행 가능한 plan bundle로
 - `co.py flow status`는 read-only 진단 YAML이며 root action source가 아니다.
 - `mode: planner`이면 Root agent는 반환된 `root_action` 하나만 수행한다.
 - `mode`가 `error`이면 에러를 보고하고 멈춘다.
-- 사용자에게 물어야 할 내용은 `root_action.question`을 기준으로 `request_user_input`에 맞게 짧게 정리해 묻는다.
+- 사용자에게 물어야 할 내용은 `root_action.question`과 `root_action.options`를 기준으로 `request_user_input`에 맞게 짧게 정리해 묻는다.
 - 사용자에게 보여줄 계획 계약은 `root_action.plan_seed` 그대로 보여준다.
 - 사용자 요청, 답변, approval, feedback은 요약·번역·정리하지 않는다.
 - 사용자 답변, approval, feedback은 `co.py flow respond --stdin`으로 전달한다.
@@ -35,6 +35,13 @@ phase: planning
 root_action:
   type: ask_user
   question: 'Change: 어떤 동작을 바꾸려는지, 보존해야 할 공개 동작은 무엇인가요?'
+  options:
+    - label: 변경 동작 설명
+      description: 바꾸려는 동작을 직접 답합니다.
+      recommended: true
+    - label: 보존 동작 설명
+      description: 유지해야 할 공개 동작을 직접 답합니다.
+      recommended: false
   response_command: co.py flow respond --stdin
 ```
 
@@ -73,7 +80,7 @@ CLI가 내부 상태 전이, interview 판단, review, task 선택을 끝낸 뒤
 
 ### `root_action`의 나머지 payload
 
-`question`, `plan_seed`, `message` 같은 field는 해당 action을 수행하는 데 필요한 입력이다.
+`question`, `options`, `plan_seed`, `message` 같은 field는 해당 action을 수행하는 데 필요한 입력이다.
 Root agent는 payload를 해석해서 새 결정을 만들지 않고, 사용자 표시나 다음 skill 실행에 필요한 만큼만 사용한다.
 
 ## Status Stdout
@@ -111,6 +118,13 @@ phase: planning
 root_action:
   type: ask_user
   question: 'Change: 어떤 동작을 바꾸려는지, 보존해야 할 공개 동작은 무엇인가요?'
+  options:
+    - label: 변경 동작 설명
+      description: 바꾸려는 동작을 직접 답합니다.
+      recommended: true
+    - label: 보존 동작 설명
+      description: 유지해야 할 공개 동작을 직접 답합니다.
+      recommended: false
   response_command: co.py flow respond --stdin
 ```
 
@@ -118,18 +132,19 @@ root_action:
 CLI가 다음 계획 결정을 위해 사용자 판단이 필요하다고 판정한 상태다.
 
 해야 할 일:
-`root_action.question`을 의미 기준으로 삼고 `request_user_input` tool로 사용자에게 묻는다.
+`root_action.question`과 `root_action.options`를 의미 기준으로 삼고 `request_user_input` tool로 사용자에게 묻는다.
 `request_user_input`이 현재 Codex surface나 mode에서 사용할 수 없으면 같은 내용을 일반 텍스트 질문으로 묻는다.
 질문 의미, 판단 범위, 답변 의미를 새로 만들지 않는다.
 Codex UI에 맞추기 위해 아래 가공만 허용한다.
 
 - `header`: 질문 앞의 짧은 prefix가 있으면 사용하고, 없으면 `Plan`처럼 12자 이하로 둔다.
 - `question`: 줄바꿈과 중복 공백을 정리하고, CLI 질문의 판단 대상을 보존한다.
-- `options`: CLI 질문 안에 실제 선택지가 있으면 2-3개로 옮긴다. 실제 선택지가 없으면 답변 의미를 대신 만들지 말고, 자유 입력을 유도하는 중립 option을 둔다.
-- `description`: option의 영향만 짧게 적고, 새로운 요구사항이나 예시 답변을 넣지 않는다.
+- `options`: CLI가 준 2-3개 option을 그대로 옮긴다. option label, description, recommended 의미를 새로 만들지 않는다.
+- `recommended`: `recommended: true`인 option을 첫 번째로 두고, tool label에는 `(Recommended)`를 붙인다.
+- `description`: CLI가 준 option description을 그대로 옮기되, 줄바꿈과 중복 공백만 정리한다.
 
 사용자가 자유 입력을 제공하면 그 텍스트를 최종 답변으로 사용한다.
-사용자가 option만 선택하면 선택된 option label과 description을 답변으로 사용한다.
+사용자가 option만 선택하면 선택된 원본 option label과 description을 답변으로 사용한다. Tool 표시용 `(Recommended)` suffix는 답변에 넣지 않는다.
 사용자 답변은 요약·번역·정리하지 않고 `co.py flow respond --stdin`으로 전달한다.
 
 ### `present_plan_seed`
