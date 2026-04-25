@@ -26,10 +26,12 @@ The reliable control point is therefore the `co flow` contract:
 - Root-agent-facing skill instructions should keep the agent as a thin `root_action` adapter.
 - If `co` can decide or validate a step mechanically, prefer adding the rule to `skills/coplan/scripts/co` over relying on prose instructions in the root agent skill.
 - Codex CLI subagents are implementation details of `co`; their JSON output is normalized by `co` before it reaches the root agent.
+- Codex CLI subagents run through isolated ephemeral `codex exec` calls with parent session env stripped, coflow nesting depth capped, user config ignored, and plugin feature loading disabled so MCP/plugin state from the parent session does not affect bounded JSON judgments.
 - Interview routing, scoring thresholds, reviewer prompts, and reviewer schemas are CLI internals in `skills/coplan/scripts/co`, not root-agent reference material.
 - Root-facing `co flow` stdout should not expose internal scores, route or track metadata, reviewer findings, progress snapshots, or command allowlists unless that data is required to perform the current `root_action`.
 
 The plan and exec strategy is modeled after the local Ouroboros project, especially its specification-first interview, ambiguity gate, execution orchestration, and evaluation gate ideas.
+The local Ouroboros project root for live code comparison is `/Users/mj/projects/ouroboros`.
 Use `.agents/knowledge/references/OUROBOROUS.md` and the linked `OUROBOROS-PLAN`, `OUROBOROS-EXEC`, and `OUROBOROS-EVAL` reference docs when comparing design intent.
 Those references are advisory source material; coflow is a Codex App/CLI-specific adaptation and should not inherit every Ouroboros behavior by default.
 

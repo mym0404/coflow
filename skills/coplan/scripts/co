@@ -94,6 +94,10 @@ CODEX_AGENT_DEFAULT_MODEL = "gpt-5.5"
 CODEX_AGENT_DEFAULT_SANDBOX = "read-only"
 CODEX_AGENT_REASONING_EFFORT = "medium"
 CODEX_AGENT_DEFAULT_TIMEOUT_SECONDS = 600
+CODEX_AGENT_CLI_NAME = "codex"
+CODEX_AGENT_MAX_COFLOW_DEPTH = 5
+CODEX_AGENT_DEPTH_ENV_KEY = "_COFLOW_CODEX_DEPTH"
+CODEX_AGENT_DISABLE_FEATURES = ("plugins",)
 CODEX_AGENT_STRIP_ENV_KEYS = {
     "OUROBOROS_AGENT_RUNTIME",
     "OUROBOROS_LLM_BACKEND",
@@ -101,7 +105,13 @@ CODEX_AGENT_STRIP_ENV_KEYS = {
     "CODEX_THREAD_ID",
     "CODEX_PARENT_AGENT_ID",
     "CODEX_EXECUTION_ID",
+    "CLAUDECODE",
 }
+CODEX_AGENT_WRAPPER_MAGIC_HEADERS = (
+    b"\xcf\xfa\xed\xfe",
+    b"\xce\xfa\xed\xfe",
+    b"\x7fELF",
+)
 NOTE_KINDS = {"discovery", "decision", "risk", "revision", "repair", "halt"}
 CONTRACT_REPAIR_ROOTS = {"files", "implementation_notes", "verification"}
 DRAFT_PLACEHOLDER_MARKER = "<!-- EX_DRAFT_PLACEHOLDER -->"
@@ -401,10 +411,50 @@ def log_flow_command_error(message):
     )
 
 
-def build_codex_child_env():
-    env = os.environ.copy()
+def is_codex_wrapper_binary(path):
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(4) in CODEX_AGENT_WRAPPER_MAGIC_HEADERS
+    except OSError:
+        return False
+
+
+def find_real_codex_cli(skip):
+    skip_path = Path(skip).resolve()
+    for directory in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(directory) / CODEX_AGENT_CLI_NAME
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        if candidate.resolve() == skip_path:
+            continue
+        if is_codex_wrapper_binary(candidate):
+            continue
+        return str(candidate)
+    return None
+
+
+def resolve_codex_cli_path():
+    candidate = shutil.which(CODEX_AGENT_CLI_NAME) or CODEX_AGENT_CLI_NAME
+    path = Path(candidate).expanduser()
+    if not path.exists() or not is_codex_wrapper_binary(path):
+        return str(path) if path.exists() else candidate
+    return find_real_codex_cli(path) or str(path)
+
+
+def build_codex_child_env(base_env=None):
+    env = dict(os.environ if base_env is None else base_env)
     for key in CODEX_AGENT_STRIP_ENV_KEYS:
         env.pop(key, None)
+    for key in list(env):
+        if "MCP" in key or "RMCP" in key:
+            env.pop(key, None)
+    try:
+        depth = int(env.get(CODEX_AGENT_DEPTH_ENV_KEY, "0")) + 1
+    except (TypeError, ValueError):
+        depth = 1
+    if depth > CODEX_AGENT_MAX_COFLOW_DEPTH:
+        raise ExError(f"maximum coflow Codex subagent depth exceeded: {CODEX_AGENT_MAX_COFLOW_DEPTH}")
+    env[CODEX_AGENT_DEPTH_ENV_KEY] = str(depth)
     return env
 
 
@@ -427,11 +477,12 @@ def build_codex_exec_command(
     sandbox=CODEX_AGENT_DEFAULT_SANDBOX,
 ):
     command = [
-        "codex",
+        resolve_codex_cli_path(),
         "exec",
         "--json",
         "--skip-git-repo-check",
         "--ephemeral",
+        "--ignore-user-config",
         "-c",
         f'model_reasoning_effort="{CODEX_AGENT_REASONING_EFFORT}"',
         "--sandbox",
@@ -441,6 +492,8 @@ def build_codex_exec_command(
         "--output-last-message",
         str(output_last_message_path),
     ]
+    for feature in CODEX_AGENT_DISABLE_FEATURES:
+        command.extend(["--disable", feature])
     if output_schema_path:
         command.extend(["--output-schema", str(output_schema_path)])
     if model:
@@ -3247,23 +3300,63 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
 
 def bundle_author_schema():
     string_array = {"type": "array", "items": {"type": "string"}}
+    verification_step = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "id": {"type": "string"},
+            "command": {"type": "string"},
+            "success_signal": {"type": "string"},
+        },
+        "required": ["id", "command", "success_signal"],
+    }
+    expected_evidence = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "step_id": {"type": "string"},
+            "file": {"type": "string"},
+        },
+        "required": ["step_id", "file"],
+    }
     task = {
         "type": "object",
-        "additionalProperties": True,
+        "additionalProperties": False,
         "properties": {
             "id": {"type": "string"},
             "kind": {"type": "string", "enum": ["execution", "checkpoint", "final_verification"]},
             "title": {"type": "string"},
             "depends_on": string_array,
-            "start_when": {"type": "object", "additionalProperties": True},
-            "files": {"type": "object", "additionalProperties": True},
+            "start_when": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {"description": {"type": "string"}},
+                "required": ["description"],
+            },
+            "files": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "primary": string_array,
+                    "generated_incidental": string_array,
+                },
+                "required": ["primary", "generated_incidental"],
+            },
             "context": {"type": "string"},
             "must_do": string_array,
             "must_not_do": string_array,
             "implementation_notes": string_array,
-            "verification": {"type": "object", "additionalProperties": True},
+            "verification": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "evidence_required": {"type": "boolean"},
+                    "steps": {"type": "array", "items": verification_step},
+                },
+                "required": ["evidence_required", "steps"],
+            },
             "acceptance_criteria": string_array,
-            "expected_evidence": {"type": "array", "items": {"type": "object", "additionalProperties": True}},
+            "expected_evidence": {"type": "array", "items": expected_evidence},
             "reopen_when": string_array,
         },
         "required": [
