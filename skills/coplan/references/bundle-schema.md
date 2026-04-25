@@ -18,7 +18,6 @@ Review gate state is stored in `status.yaml.review`.
     interview.yaml
     status.yaml
     notes.yaml
-    events.yaml
     evidence.yaml
     evidence/
 ```
@@ -235,6 +234,7 @@ Use `halt` only for `user_decision` or `external_environment`.
 ## `notes.yaml`
 
 `notes.yaml` is append-only semantic memory. It records review findings, decisions, risks, revisions, repairs, and halt notes. Do not edit it directly.
+Task-related notes use `task:<task-id>` in `affects`.
 
 ```yaml
 entries:
@@ -248,10 +248,6 @@ entries:
     source: co planner review run
 ```
 
-## `events.yaml`
-
-`events.yaml` is append-only transition history owned by `co`. It records init, interview scoring, skeleton generation, review, approval, finalize, task execution, evidence, repair, halt, and finish.
-
 ## `evidence.yaml`
 
 `evidence.yaml` is the append-only evidence manifest owned by `co exec evidence add`.
@@ -261,14 +257,15 @@ Loose files under `evidence/` are not enough; a task is not complete until requi
 
 ```bash
 co current
-co show --file draft|plan|tasks|planning-context|interview|status|notes|events|evidence
+co show --file draft|plan|tasks|planning-context|interview|status|notes|evidence
 co exec status
 co exec ready
 co exec show-task <task-id>
+co note list --task <task-id> --limit <n>
 co review-context
 ```
 
-`co review-context` includes the Markdown draft body plus `plan.yaml`, `tasks.yaml`, `planning_context.yaml`, `interview.yaml`, current state, notes, events, evidence, and git context.
+`co review-context` includes the Markdown draft body plus `plan.yaml`, `tasks.yaml`, `planning_context.yaml`, `interview.yaml`, current state, notes, evidence, and git context.
 
 ## Write Commands
 

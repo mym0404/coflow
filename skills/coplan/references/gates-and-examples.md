@@ -20,7 +20,7 @@ A bundle is planner-ready only when:
 - `status.yaml` task ids match `tasks.yaml` task ids.
 - `status.yaml.review.status` is `passed`.
 - `status.yaml.review.fingerprint` matches current `plan.yaml`, `tasks.yaml`, and `interview.yaml`.
-- `events.yaml` and `evidence.yaml` are present and CLI-managed.
+- `notes.yaml` and `evidence.yaml` are present and CLI-managed.
 - `co planner finalize` succeeds.
 
 ## Interview Gate
@@ -52,7 +52,7 @@ A bundle is planner-ready only when:
 - `contract_reviewer` checks hidden decisions, scope drift, contradictions, task DAG assumptions, file scope, and acceptance criteria.
 - `verification_reviewer` checks commands, evidence, final verification, and success signals.
 - Both reviewers must return `PASS`.
-- Failed review results are recorded in `notes.yaml` and `events.yaml`.
+- Review results are recorded in `notes.yaml`.
 - Passing review stores `status.yaml.review.status: passed` and a fingerprint over `plan.yaml`, `tasks.yaml`, and `interview.yaml`.
 - If those files change after review, `approve-draft` and `finalize` fail until review passes again.
 - Wording-only changes to `draft.md` do not invalidate the review fingerprint.
@@ -60,7 +60,7 @@ A bundle is planner-ready only when:
 ## Direct Patch Gate
 
 - `draft.md`, `plan.yaml`, and `tasks.yaml` may be patched directly after `co planner generate-skeleton`.
-- `interview.yaml`, `status.yaml`, `events.yaml`, `notes.yaml`, and `evidence.yaml` remain CLI-owned.
+- `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml` remain CLI-owned.
 - Direct changes to `plan.yaml` or `tasks.yaml` must be followed by `co planner validate` and pre-draft review.
 
 ## Execution Gate
@@ -97,7 +97,7 @@ A task with `verification.evidence_required: true` is done only when:
 - `implementation_notes`
 - `verification`
 
-It must append one event in `events.yaml` and one repair note in `notes.yaml`.
+It must append one repair note in `notes.yaml`.
 
 It must not modify:
 

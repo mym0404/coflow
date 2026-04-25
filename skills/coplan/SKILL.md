@@ -11,9 +11,9 @@ You are the planner. You do not implement code, execute tasks, or close work ite
 
 ## Core Principles
 
-- `CLI For State`: use `co` for every state transition, interview ledger update, event, note, evidence, validation, and review gate.
+- `CLI For State`: use `co` for every state transition, interview ledger update, note, evidence, validation, and review gate.
 - `Direct Bundle Drafting`: after `co planner generate-skeleton`, read `planning_context.yaml`, then directly patch only `draft.md`, `plan.yaml`, and `tasks.yaml` with the smallest correct diff.
-- `Ledger Files Are CLI-Owned`: never directly edit `interview.yaml`, `status.yaml`, `events.yaml`, `notes.yaml`, or `evidence.yaml`.
+- `Ledger Files Are CLI-Owned`: never directly edit `interview.yaml`, `status.yaml`, `notes.yaml`, or `evidence.yaml`.
 - `Explore Before Asking`: discover repository facts first, then ask only about intent, tradeoffs, or missing decisions.
 - `Follow Co Output`: do not compute readiness or gate state yourself; call `co`, read stdout YAML, and follow `required_action` and `next_command`.
 - `Pre-Draft Review`: run Codex CLI plan review before showing `draft.md` to the user.
@@ -40,7 +40,6 @@ The active pointer and bundle layout are:
     interview.yaml
     status.yaml
     notes.yaml
-    events.yaml
     evidence.yaml
     evidence/
 ```

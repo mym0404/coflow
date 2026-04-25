@@ -7,13 +7,14 @@ description: Executor-only skill that runs the active `.agents/plan/{plan-id}` Y
 
 Run the active YAML plan-execute bundle selected by `.agents/plan/exec.yaml`.
 
-You are the executor. You do not redesign the approved user contract. You execute locally and sequentially, using `~/.codex/skills/coplan/scripts/co` for every bundle read, write, state transition, event, note, and evidence operation. Do not read or edit bundle YAML files directly.
+You are the executor. You do not redesign the approved user contract. You execute locally and sequentially, using `~/.codex/skills/coplan/scripts/co` for every bundle read, write, state transition, note, and evidence operation. Do not read or edit bundle YAML files directly.
 
 ## Core Principles
 
 - `Status First`: start each loop with `co exec status`; it is the current execution context and drift guard.
 - `Follow Co Output`: treat `co` stdout YAML as the contract and follow `required_action`, `allowed_now`, and `forbidden_now`.
-- `Static Contract, Dynamic State`: `tasks.yaml` is the immutable execution contract; `status.yaml` is current progress; `events.yaml` and `evidence.yaml` are CLI-managed append-only records.
+- `Static Contract, Dynamic State`: `tasks.yaml` is the immutable execution contract; `status.yaml` is current progress; `notes.yaml` and `evidence.yaml` are CLI-managed runtime memory.
+- `Notes In The Loop`: use `notes` from `co exec status` and `co exec show-task` as persistent execution context; record material discoveries with `co note append`.
 - `Ready Before Doing`: only tasks returned by `co exec ready` may be claimed.
 - `One Doing Task`: if a task is `Doing`, finish, repair, add evidence, or halt that task before claiming another.
 - `In-Contract Failures Stay Doing`: ordinary failures keep the current task in `Doing` until repaired, evidenced, completed, or halted.
@@ -42,6 +43,7 @@ Use its output as the source for:
 - ready tasks
 - allowed and forbidden commands
 - required and recorded evidence
+- recent and current-task notes
 - current task files, verification steps, and acceptance criteria
 
 Do not inspect bundle YAML files directly.
@@ -77,13 +79,13 @@ After running a verification command, record its output through `co`:
   --stdin
 ```
 
-`co` writes the artifact under `evidence/`, appends the manifest record to `evidence.yaml`, and appends an event to `events.yaml`.
+`co` writes the artifact under `evidence/`, appends the manifest record to `evidence.yaml`, and records a `risk` note when the evidence is unsuccessful.
 
 ### Step 5: Complete Or Continue Repair
 
 - Run `co exec complete-task <task-id>` only after acceptance criteria are satisfied and required evidence has been recorded.
 - If completion fails because evidence is missing, keep the task in `Doing`, record or repair evidence, and retry.
-- If verification fails but the failure stays inside the current task contract, keep the task in `Doing` and continue fixing in the same turn.
+- If verification fails but the failure stays inside the current task contract, read the automatic risk note, keep the task in `Doing`, and continue fixing in the same turn.
 - After a task reaches `Done`, run `co exec status` again and continue to the next ready task.
 
 ### Step 6: Finish
@@ -104,4 +106,4 @@ After running a verification command, record its output through `co`:
 - If `co exec finish` succeeds, the first line of the final report must be exactly `최종 완료 🎉`.
 - If execution stops early, the first line must name the open gate: current task, `halted` phase, or external environment issue.
 - Report the active plan id and path from `co current`.
-- Report task transitions, evidence records, repair events, and verification results.
+- Report task transitions, evidence records, repair or halt notes, and verification results.

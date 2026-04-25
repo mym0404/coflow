@@ -103,28 +103,6 @@ CODEX_AGENT_STRIP_ENV_KEYS = {
     "CODEX_EXECUTION_ID",
 }
 NOTE_KINDS = {"discovery", "decision", "risk", "revision", "repair", "halt"}
-EVENT_KINDS = {
-    "plan_initialized",
-    "phase_changed",
-    "codex_agent_ran",
-    "interview_recorded",
-    "interview_question_asked",
-    "interview_track_changed",
-    "interview_closed",
-    "interview_closure_checked",
-    "interview_blocker_changed",
-    "interview_scored",
-    "skeleton_generated",
-    "draft_approved",
-    "bundle_finalized",
-    "planner_review_recorded",
-    "planner_review_passed",
-    "task_claimed",
-    "task_completed",
-    "task_repaired",
-    "task_halted",
-    "evidence_recorded",
-}
 CONTRACT_REPAIR_ROOTS = {"files", "implementation_notes", "verification"}
 DRAFT_PLACEHOLDER_MARKER = "<!-- EX_DRAFT_PLACEHOLDER -->"
 DRAFT_APPROVED_PHASES = {
@@ -443,7 +421,6 @@ def file_path(plan_dir, name):
         "interview": "interview.yaml",
         "status": "status.yaml",
         "notes": "notes.yaml",
-        "events": "events.yaml",
         "evidence": "evidence.yaml",
     }
     if name not in mapping:
@@ -479,24 +456,6 @@ def next_id(items, prefix):
     return f"{prefix}{max_seen + 1}"
 
 
-def append_event(plan_dir, kind, summary, affects, source):
-    if kind not in EVENT_KINDS:
-        raise ExError(f"unknown event kind: {kind}")
-    path = plan_dir / "events.yaml"
-    data = load_yaml(path)
-    events = data.setdefault("events", [])
-    event = {
-        "id": next_id(events, "E"),
-        "kind": kind,
-        "summary": summary,
-        "affects": affects,
-        "source": source,
-    }
-    events.append(event)
-    write_yaml(path, data)
-    return event
-
-
 def append_note(plan_dir, kind, text, why, affects, source):
     if kind not in NOTE_KINDS:
         raise ExError(f"unknown note kind: {kind}")
@@ -516,6 +475,43 @@ def append_note(plan_dir, kind, text, why, affects, source):
     return entry
 
 
+def notes_entries(notes):
+    entries = notes.get("entries", [])
+    if not isinstance(entries, list):
+        raise ExError("notes.yaml entries must be a list")
+    return entries
+
+
+def filter_notes(entries, kind=None, task_id=None):
+    filtered = entries
+    if kind:
+        filtered = [entry for entry in filtered if entry.get("kind") == kind]
+    if task_id:
+        task_key = f"task:{task_id}"
+        filtered = [
+            entry
+            for entry in filtered
+            if task_key in (entry.get("affects") or [])
+        ]
+    return filtered
+
+
+def limit_notes(entries, limit):
+    if limit is None:
+        return entries
+    if limit <= 0:
+        raise ExError("--limit must be greater than 0")
+    return entries[-limit:]
+
+
+def exec_notes_view(bundle, current_id):
+    entries = notes_entries(bundle["notes"])
+    return {
+        "recent": limit_notes(entries, 5),
+        "current_task": filter_notes(entries, task_id=current_id) if current_id else [],
+    }
+
+
 def load_bundle():
     plan_id, plan_dir = active_plan()
     planning_context_path = plan_dir / "planning_context.yaml"
@@ -529,7 +525,6 @@ def load_bundle():
         "interview": load_yaml(plan_dir / "interview.yaml"),
         "status": load_yaml(plan_dir / "status.yaml"),
         "notes": load_yaml(plan_dir / "notes.yaml"),
-        "events": load_yaml(plan_dir / "events.yaml"),
         "evidence": load_yaml(plan_dir / "evidence.yaml"),
     }
 
@@ -1326,7 +1321,6 @@ def command_review_context(_args):
         "interview": bundle["interview"],
         "status": bundle["status"],
         "notes": bundle["notes"],
-        "events": bundle["events"],
         "evidence": bundle["evidence"],
     }
     try:
@@ -1423,15 +1417,7 @@ def planner_init(args):
         },
     )
     write_yaml(plan_dir / "notes.yaml", {"entries": []})
-    write_yaml(plan_dir / "events.yaml", {"events": []})
     write_yaml(plan_dir / "evidence.yaml", {"records": []})
-    append_event(
-        plan_dir,
-        "plan_initialized",
-        "Initialized plan execution.",
-        ["exec.yaml", "status.yaml#phase"],
-        "co planner init",
-    )
     print_result(
         {"active_plan_id": args.plan_id, "plan_dir": str(plan_dir)},
         "Explore the repository for code facts, then run `co planner interview ask-next`.",
@@ -1479,7 +1465,6 @@ def agent_context(plan_dir):
         "interview": load_yaml(plan_dir / "interview.yaml"),
         "status": load_yaml(plan_dir / "status.yaml"),
         "notes": load_yaml(plan_dir / "notes.yaml"),
-        "events": load_yaml(plan_dir / "events.yaml"),
     }
     return dump_json(
         {
@@ -1513,13 +1498,6 @@ def append_interview_agent_run(plan_dir, interview, role, status, output=None, e
     }
     runs.append(run)
     write_yaml(plan_dir / "interview.yaml", interview)
-    append_event(
-        plan_dir,
-        "codex_agent_ran",
-        f"Codex CLI agent {role} {status}.",
-        ["interview.yaml#agent_runs"],
-        f"co planner interview {role}",
-    )
     return run
 
 
@@ -1649,7 +1627,7 @@ def reviewer_prompt(plan_dir, reviewer):
     )
 
 
-def create_pending_question(plan_dir, interview, route, track, question, source_command):
+def create_pending_question(plan_dir, interview, route, track, question):
     if interview.get("status") == "closed":
         raise ExError("interview is closed; reopen a track before asking more questions")
     if interview.get("pending_user_question") is not None:
@@ -1670,13 +1648,6 @@ def create_pending_question(plan_dir, interview, route, track, question, source_
     interview["pending_user_question"] = pending
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
-    append_event(
-        plan_dir,
-        "interview_question_asked",
-        f"Asked pending user question {pending['id']} for {track}.",
-        ["interview.yaml#pending_user_question"],
-        source_command,
-    )
     return pending
 
 
@@ -1690,7 +1661,6 @@ def planner_interview_ask(args):
         args.route,
         args.track,
         args.question,
-        "co planner interview ask",
     )
     print_result(
         {"pending_user_question": pending},
@@ -1718,7 +1688,6 @@ def planner_interview_ask_next(args):
             output["route"],
             output["track"],
             output["question"],
-            "co planner interview ask-next",
         )
         print_result(
             {"action": action, "pending_user_question": pending, "reason": output["reason"]},
@@ -1832,13 +1801,6 @@ def planner_interview_score(args):
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
-    append_event(
-        plan_dir,
-        "interview_scored",
-        f"Ambiguity scored at {score['ambiguity']}.",
-        ["interview.yaml#ambiguity"],
-        "co planner interview score",
-    )
     print_result(
         {"ambiguity": score},
         "If ambiguity.ready is false, ask the recommended follow-up; otherwise close tracks, pass closure checks, and close the interview.",
@@ -1896,13 +1858,6 @@ def planner_interview_record(args):
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
-    append_event(
-        plan_dir,
-        "interview_recorded",
-        f"Recorded interview answer {round_item['id']} for {args.track}.",
-        ["interview.yaml#rounds", "interview.yaml#non_user_answer_streak"],
-        "co planner interview record",
-    )
     print_result(
         {"round": round_item, "non_user_answer_streak": interview["non_user_answer_streak"]},
         "Run `co planner interview score --mode auto`.",
@@ -1920,7 +1875,6 @@ def planner_interview_track(args):
     if args.track_action == "close":
         track["status"] = "closed"
         track["summary"] = args.summary
-        summary = f"Interview track {args.track} closed."
     else:
         track["status"] = "open"
         track["summary"] = ""
@@ -1931,20 +1885,9 @@ def planner_interview_track(args):
         status["phase"] = "drafting"
         validate_status(status, load_yaml(plan_dir / "tasks.yaml"))
         write_yaml(plan_dir / "status.yaml", status)
-        summary = f"Interview track {args.track} reopened: {args.reason}"
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
-    affects = [f"interview.yaml#required_tracks.{args.track}", "interview.yaml#closure"]
-    if args.track_action == "open":
-        affects.append("status.yaml#phase")
-    append_event(
-        plan_dir,
-        "interview_track_changed",
-        summary,
-        affects,
-        f"co planner interview track {args.track_action}",
-    )
     if args.track_action == "close":
         required_action = "Continue closing remaining tracks and closure checks; then run `co planner interview close --summary \"...\"` when blockers are clear."
     else:
@@ -1966,13 +1909,6 @@ def planner_interview_closure_check(args):
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
-    append_event(
-        plan_dir,
-        "interview_closure_checked",
-        f"Interview closure check passed: {args.check}.",
-        [f"interview.yaml#closure.checks.{args.check}", "interview.yaml#closure"],
-        "co planner interview closure-check",
-    )
     print_result(
         {"check": args.check, "passed": True},
         "Continue remaining closure checks or run `co planner interview close --summary \"...\"` when all blockers are clear.",
@@ -1987,23 +1923,14 @@ def planner_interview_blocker(args):
     if args.blocker_action == "add":
         if args.reason not in blockers:
             blockers.append(args.reason)
-        summary = "Interview material blocker added."
     else:
         if args.reason in blockers:
             blockers.remove(args.reason)
-        summary = "Interview material blocker cleared."
     interview["status"] = "open"
     interview["closure"]["ready"] = False
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
-    append_event(
-        plan_dir,
-        "interview_blocker_changed",
-        summary,
-        ["interview.yaml#closure.material_blockers", "interview.yaml#closure"],
-        f"co planner interview blocker {args.blocker_action}",
-    )
     print_result(
         {"material_blockers": blockers},
         "Resolve any remaining material_blockers; when empty and all gates pass, run `co planner interview close --summary \"...\"`.",
@@ -2031,13 +1958,6 @@ def planner_interview_close(args):
     validate_interview(interview)
     write_yaml(plan_dir / "interview.yaml", interview)
     reset_review_status(plan_dir)
-    append_event(
-        plan_dir,
-        "interview_closed",
-        "Interview closed and draft gate opened.",
-        ["interview.yaml#status", "interview.yaml#closure"],
-        "co planner interview close",
-    )
     print_result(
         {"status": "closed", "draft_ready": True},
         "Run `co planner generate-skeleton`.",
@@ -2177,20 +2097,6 @@ def planner_generate_skeleton(_args):
     write_yaml(plan_dir / "tasks.yaml", tasks)
     sync_status_tasks(plan_dir, tasks)
     reset_review_status(plan_dir)
-    append_event(
-        plan_dir,
-        "skeleton_generated",
-        "Generated planning context, draft, plan, and task skeletons.",
-        [
-            "planning_context.yaml",
-            "draft.md",
-            "plan.yaml",
-            "tasks.yaml",
-            "status.yaml#tasks",
-            "status.yaml#review",
-        ],
-        "co planner generate-skeleton",
-    )
     print_result(
         {
             "written": ["planning_context.yaml", "draft.md", "plan.yaml", "tasks.yaml"],
@@ -2219,13 +2125,6 @@ def planner_approve_draft(args):
             ["draft.md", "status.yaml#phase"],
             "co planner approve-draft",
         )
-    append_event(
-        plan_dir,
-        "draft_approved",
-        "Draft approved and planning phase opened.",
-        ["draft.md", "status.yaml#phase"],
-        "co planner approve-draft",
-    )
     print_result(
         {"phase": "planning"},
         "Run `co planner validate`, then `co planner finalize`.",
@@ -2247,13 +2146,6 @@ def planner_finalize(_args):
     require_review_passed(plan_dir, status, "planner finalize")
     status["phase"] = "ready_for_exec"
     write_yaml(plan_dir / "status.yaml", status)
-    append_event(
-        plan_dir,
-        "bundle_finalized",
-        "Bundle finalized and ready for execution.",
-        ["status.yaml#phase"],
-        "co planner finalize",
-    )
     print_result(
         {"phase": "ready_for_exec"},
         "Planning is finalized. Switch to the `coexec` skill and start with `co exec status`.",
@@ -2318,13 +2210,6 @@ def planner_review_run(args):
             ["plan.yaml", "tasks.yaml"],
             "co planner review run",
         )
-        append_event(
-            plan_dir,
-            "planner_review_recorded",
-            f"{reviewer} returned {review_status}.",
-            ["status.yaml#review", "notes.yaml"],
-            "co planner review run",
-        )
 
     previous_status = status
     status = load_yaml(plan_dir / "status.yaml")
@@ -2339,14 +2224,6 @@ def planner_review_run(args):
     }
     validate_status(status, tasks)
     write_yaml(plan_dir / "status.yaml", status)
-    if status["review"]["status"] == "passed":
-        append_event(
-            plan_dir,
-            "planner_review_passed",
-            "All required Codex CLI pre-draft reviewers passed.",
-            ["status.yaml#review"],
-            "co planner review run",
-        )
     if status["review"]["status"] == "passed":
         required_action = "Show `draft.md` to the user with `co show --file draft`; after approval, run `co planner approve-draft --comment \"...\"`."
         next_command = "co show --file draft"
@@ -2380,9 +2257,8 @@ def note_append(args):
 
 def note_list(args):
     notes = load_active_file("notes")
-    entries = notes.get("entries", [])
-    if args.kind:
-        entries = [entry for entry in entries if entry.get("kind") == args.kind]
+    entries = filter_notes(notes_entries(notes), kind=args.kind, task_id=args.task)
+    entries = limit_notes(entries, args.limit)
     print_result({"entries": entries}, "Use the listed notes as context, then continue the current flow.")
 
 
@@ -2395,13 +2271,6 @@ def exec_start(_args):
         raise ExError("execution can start only from ready_for_exec")
     status["phase"] = "executing"
     write_yaml(plan_dir / "status.yaml", status)
-    append_event(
-        plan_dir,
-        "phase_changed",
-        "Execution started.",
-        ["status.yaml#phase"],
-        "co exec start",
-    )
     print_result(
         {"phase": "executing"},
         "Run `co exec status` and follow allowed_now.",
@@ -2424,8 +2293,9 @@ def exec_show_task(args):
     task = find_task(bundle, args.task_id)
     statuses = task_status(bundle)
     records = recorded_evidence_for_task(bundle, args.task_id)
+    entries = filter_notes(notes_entries(bundle["notes"]), task_id=args.task_id)
     print_result(
-        {"task": task, "status": statuses.get(args.task_id), "evidence": records},
+        {"task": task, "status": statuses.get(args.task_id), "evidence": records, "notes": entries},
         "Execute the task within its contract, run verification, then record evidence with `co exec evidence add`.",
     )
 
@@ -2458,6 +2328,7 @@ def current_task_status(bundle, current_id):
 def current_task_allowed_commands(current_id):
     return [
         f'co exec evidence add --task {current_id} --step <step-id> --name <file> --command "..." --exit-code <code> --success true|false --stdin',
+        f'co note append risk --text "..." --why "..." --affects task:{current_id} --source "coexec"',
         f'co exec repair {current_id} --field <path> --reason "..."',
         f"co exec complete-task {current_id}",
         f'co exec halt --kind user_decision|external_environment --task {current_id} --reason "..."',
@@ -2531,6 +2402,7 @@ def exec_status(_args):
         "forbidden_now": forbidden,
         "current_task_view": current_view,
         "evidence_state": evidence_state,
+        "notes": exec_notes_view(bundle, current_id),
         "halt": bundle["status"].get("halt"),
         "drift_guard": {
             "message": "Do not switch tasks or widen scope. Complete or repair the current task unless halt is required."
@@ -2553,13 +2425,6 @@ def exec_claim(args):
     status["current_task"] = args.task_id
     status["tasks"][args.task_id] = "Doing"
     write_yaml(bundle["plan_dir"] / "status.yaml", status)
-    append_event(
-        bundle["plan_dir"],
-        "task_claimed",
-        f"{args.task_id} moved from Todo to Doing.",
-        [f"status.yaml#tasks.{args.task_id}", "status.yaml#current_task"],
-        f"co exec claim {args.task_id}",
-    )
     print_result(
         {"task": args.task_id, "status": "Doing"},
         "Execute the claimed task, run verification, and record evidence with `co exec evidence add`.",
@@ -2600,20 +2465,23 @@ def exec_evidence_add(args):
     }
     records.append(record)
     write_yaml(bundle["plan_dir"] / "evidence.yaml", evidence)
-    append_event(
-        bundle["plan_dir"],
-        "evidence_recorded",
-        f"Recorded evidence for {args.task}/{args.step}.",
-        ["evidence.yaml", str(artifact)],
-        f"co exec evidence add --task {args.task} --step {args.step}",
-    )
+    data = {"record": record}
     if record["success"]:
         required_action = "If acceptance criteria are satisfied and all required evidence is recorded, run `co exec complete-task <task-id>`; otherwise continue the task."
         next_command = f"co exec complete-task {args.task}"
     else:
+        note = append_note(
+            bundle["plan_dir"],
+            "risk",
+            f"Verification failed for {args.task}/{args.step}.",
+            f"Command exited {args.exit_code}: {args.command}",
+            [f"task:{args.task}", "evidence.yaml", str(artifact)],
+            f"co exec evidence add --task {args.task} --step {args.step}",
+        )
+        data["note"] = note
         required_action = "Keep the task Doing; repair or fix within contract, rerun verification, and record new evidence."
         next_command = None
-    print_result({"record": record}, required_action, next_command)
+    print_result(data, required_action, next_command)
 
 
 def set_nested(data, path, value=None, add=False, remove=False):
@@ -2657,23 +2525,16 @@ def exec_repair(args):
         set_nested(task, args.field, parse_yaml_value(args.remove_value), remove=True)
     validate_tasks(tasks_data)
     write_yaml(bundle["plan_dir"] / "tasks.yaml", tasks_data)
-    event = append_event(
-        bundle["plan_dir"],
-        "task_repaired",
-        f"Repaired {args.task_id} field {args.field}.",
-        [f"tasks.yaml#{args.task_id}.{args.field}"],
-        f"co exec repair {args.task_id}",
-    )
     note = append_note(
         bundle["plan_dir"],
         "repair",
         f"Repaired {args.task_id} field {args.field}.",
         args.reason,
-        [f"tasks.yaml#{args.task_id}.{args.field}"],
-        event["id"],
+        [f"task:{args.task_id}", f"tasks.yaml#{args.task_id}.{args.field}"],
+        f"co exec repair {args.task_id}",
     )
     print_result(
-        {"event": event, "note": note},
+        {"note": note},
         "Rerun the relevant verification command and record evidence.",
     )
 
@@ -2690,13 +2551,6 @@ def exec_complete_task(args):
     status["tasks"][args.task_id] = "Done"
     status["current_task"] = None
     write_yaml(bundle["plan_dir"] / "status.yaml", status)
-    append_event(
-        bundle["plan_dir"],
-        "task_completed",
-        f"{args.task_id} moved from Doing to Done.",
-        [f"status.yaml#tasks.{args.task_id}", "status.yaml#current_task"],
-        f"co exec complete-task {args.task_id}",
-    )
     print_result(
         {"task": args.task_id, "status": "Done"},
         "Run `co exec status` to choose the next ready task or finish.",
@@ -2714,23 +2568,19 @@ def exec_halt(args):
     status["phase"] = "halted"
     status["halt"] = {"kind": args.kind, "task": args.task, "reason": args.reason}
     write_yaml(bundle["plan_dir"] / "status.yaml", status)
-    event = append_event(
-        bundle["plan_dir"],
-        "task_halted",
-        f"Execution halted: {args.reason}",
-        ["status.yaml#phase", "status.yaml#halt"],
-        "co exec halt",
-    )
+    affects = ["status.yaml#halt"]
+    if args.task:
+        affects.insert(0, f"task:{args.task}")
     note = append_note(
         bundle["plan_dir"],
         "halt",
         f"Execution halted: {args.reason}",
         args.kind,
-        ["status.yaml#halt"],
-        event["id"],
+        affects,
+        "co exec halt",
     )
     print_result(
-        {"phase": "halted", "halt": status["halt"], "event": event, "note": note},
+        {"phase": "halted", "halt": status["halt"], "note": note},
         "Stop execution and report the halt reason to the user.",
     )
 
@@ -2747,13 +2597,6 @@ def exec_finish(_args):
     status["phase"] = "complete"
     status["current_task"] = None
     write_yaml(bundle["plan_dir"] / "status.yaml", status)
-    append_event(
-        bundle["plan_dir"],
-        "phase_changed",
-        "Execution completed.",
-        ["status.yaml#phase"],
-        "co exec finish",
-    )
     print_result({"phase": "complete"}, "Report final completion to the user.")
 
 
@@ -2776,7 +2619,6 @@ def build_parser():
             "interview",
             "status",
             "notes",
-            "events",
             "evidence",
         ],
     )
@@ -2876,6 +2718,8 @@ def build_parser():
     note_append_parser.set_defaults(func=note_append)
     note_list_parser = note_sub.add_parser("list")
     note_list_parser.add_argument("--kind", choices=sorted(NOTE_KINDS))
+    note_list_parser.add_argument("--task")
+    note_list_parser.add_argument("--limit", type=int)
     note_list_parser.set_defaults(func=note_list)
 
     exec_parser = sub.add_parser("exec")

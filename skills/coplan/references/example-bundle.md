@@ -14,7 +14,6 @@ Use this only for density calibration. Create real bundles with `co planner init
     interview.yaml
     status.yaml
     notes.yaml
-    events.yaml
     evidence.yaml
     evidence/
 ```
@@ -301,19 +300,6 @@ entries:
       - plan.yaml
       - tasks.yaml
     source: co planner review run
-```
-
-## `events.yaml`
-
-```yaml
-events:
-  - id: E1
-    kind: plan_initialized
-    summary: Initialized plan execution.
-    affects:
-      - exec.yaml
-      - status.yaml#phase
-    source: co planner init
 ```
 
 ## `evidence.yaml`

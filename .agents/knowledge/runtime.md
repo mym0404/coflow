@@ -22,7 +22,7 @@ The root agent should not compute gate readiness, interview next steps, ambiguit
 `co` exists because Codex App and Codex CLI users do not have a development SDK that lets this repository enforce agent behavior directly in code.
 The reliable control point is therefore the CLI contract:
 
-- `co` owns bundle files, validation, state transitions, event records, evidence records, review freshness, and halt or finish gates.
+- `co` owns bundle files, validation, state transitions, notes, evidence records, review freshness, and halt or finish gates.
 - Root-agent-facing skill instructions should keep the agent as a thin stdout-driven adapter.
 - If `co` can decide or validate a step mechanically, prefer adding the rule to `skills/coplan/scripts/co` over relying on prose instructions in the root agent skill.
 - Codex CLI subagents are implementation details of `co`; their JSON output is normalized by `co` before it reaches the root agent.
@@ -54,7 +54,7 @@ Core flow:
 - finalize with `co planner finalize` only after the draft is approved.
 
 Direct bundle edits are limited to `draft.md`, `plan.yaml`, and `tasks.yaml` after skeleton generation.
-CLI-owned files such as `interview.yaml`, `status.yaml`, `events.yaml`, `notes.yaml`, and `evidence.yaml` are not edited directly.
+CLI-owned files such as `interview.yaml`, `status.yaml`, `notes.yaml`, and `evidence.yaml` are not edited directly.
 
 Planner flow is valid only when the root agent follows `co` stdout instead of recreating the full flow from memory.
 When changing planner behavior, keep `skills/coplan/references/root-agent-co-guide.md`, `skills/coplan/SKILL.md`, `skills/coplan/README.md`, and `skills/coplan/scripts/co` aligned around that contract.

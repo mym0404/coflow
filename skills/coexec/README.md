@@ -18,8 +18,8 @@ Executor runtime uses the root agent, local repo commands, and `co`.
 | Edge | Mechanism | Input | Output |
 |---|---|---|---|
 | Root agent -> `co` | Synchronous shell command | CLI args and verification output piped to stdin for evidence | exit code plus stdout YAML |
-| `co` -> Root agent | YAML on stdout | current bundle state or mutation result | YAML mappings such as `ok`, `required_action`, `next_command`, `phase`, `allowed_now`, `current_task`, `record`, `event`, `error` |
-| `co` -> Bundle | YAML file read/write | command-specific validated state | updated `status.yaml`, `events.yaml`, `evidence.yaml`, `tasks.yaml` repair envelope, and evidence artifacts |
+| `co` -> Root agent | YAML on stdout | current bundle state or mutation result | YAML mappings such as `ok`, `required_action`, `next_command`, `phase`, `allowed_now`, `current_task`, `record`, `note`, `error` |
+| `co` -> Bundle | YAML file read/write | command-specific validated state | updated `status.yaml`, `notes.yaml`, `evidence.yaml`, `tasks.yaml` repair envelope, and evidence artifacts |
 
 Root agents should treat `co exec status` as the source of truth for every loop and `required_action` as the primary next-step instruction. `ok: false` means the root agent must satisfy the named gate or correct the command input before continuing. Do not read or edit bundle YAML directly while using `coexec`.
 
@@ -31,7 +31,7 @@ Root agents should treat `co exec status` as the source of truth for every loop 
    co exec status
    ```
 
-   This prints active plan, phase, current task, ready tasks, allowed commands, forbidden commands, evidence state, and drift guard.
+   This prints active plan, phase, current task, ready tasks, allowed commands, forbidden commands, evidence state, notes, and drift guard.
 
 2. Start execution if needed.
 
@@ -56,7 +56,7 @@ Root agents should treat `co exec status` as the source of truth for every loop 
    co exec show-task <task-id>
    ```
 
-   Use task files, verification steps, acceptance criteria, and recorded evidence from this output.
+   Use task files, verification steps, acceptance criteria, recorded evidence, and task notes from this output.
 
 5. Implement locally inside the approved task scope.
 
@@ -75,7 +75,7 @@ Root agents should treat `co exec status` as the source of truth for every loop 
      --stdin
    ```
 
-   `co` writes the artifact under `evidence/`, appends a manifest record to `evidence.yaml`, and appends an event to `events.yaml`.
+   `co` writes the artifact under `evidence/`, appends a manifest record to `evidence.yaml`, and records a `risk` note when the evidence is unsuccessful.
 
 7. Complete the task.
 
@@ -91,7 +91,7 @@ Root agents should treat `co exec status` as the source of truth for every loop 
    co exec repair <task-id> --field <path> --reason "..." --set|--add|--remove <yaml-value>
    ```
 
-   Repair can touch only `files`, `implementation_notes`, or `verification`. It appends a repair event and note.
+   Repair can touch only `files`, `implementation_notes`, or `verification`. It appends a repair note.
 
 9. Halt only for real stop conditions.
 
@@ -149,11 +149,11 @@ sequenceDiagram
   EX->>Bundle: read active plan and state
   EX-->>Root: stdout YAML with phase, task, allowed_now
   Root->>EX: co exec start or claim
-  EX->>Bundle: update status and events
+  EX->>Bundle: update status
   Root->>Shell: edit files and run verification
   Shell-->>Root: command output and exit code
   Root->>EX: co exec evidence add --stdin
-  EX->>Bundle: write evidence artifact, evidence.yaml, events.yaml
+  EX->>Bundle: write evidence artifact, evidence.yaml, and failure note when needed
   Root->>EX: co exec complete-task
   EX->>Bundle: check required evidence and mark Done
   Root->>EX: co exec status
@@ -186,12 +186,16 @@ progress:
   ready_now: []
 allowed_now:
   - co exec evidence add --task T1 ...
+  - co note append risk --text "..." --why "..." --affects task:T1 --source "coexec"
 forbidden_now:
   - claim another task while T1 is Doing
 evidence_state:
   required:
     - evidence/t1-focused.txt
   recorded: []
+notes:
+  recent: []
+  current_task: []
 halt: null
 required_action: Continue current_task; record evidence, repair, complete, or halt using allowed_now.
 ```

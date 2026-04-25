@@ -27,7 +27,7 @@ sequenceDiagram
     Root->>User: [추론기계] ask exact pending question
     User-->>Root: [유저] answer
     Root->>Co: [추론기계] co planner interview record ...
-    Co->>Co: [기계] append round, clear pending question, append event
+    Co->>Co: [기계] append round and clear pending question
   else record_fact
     Co->>Co: [기계] append code_fact or research_confirmation round
     Co-->>Root: [기계] stdout YAML with next_command
@@ -39,7 +39,7 @@ sequenceDiagram
   Co->>Co: [기계] read interview rounds
   Co->>Sub: [기계] launch ambiguity scorer
   Sub-->>Co: [추론형식] clarity component JSON
-  Co->>Co: [기계] compute ambiguity, write score, append event
+  Co->>Co: [기계] compute ambiguity and write score
   Co-->>Root: [기계] stdout YAML: ready state or follow-up
 
   loop until interview close gates pass
@@ -49,7 +49,7 @@ sequenceDiagram
   end
 
   Root->>Co: [추론기계] co planner interview close --summary ...
-  Co->>Co: [기계] mark interview closed and append event
+  Co->>Co: [기계] mark interview closed
   Co-->>Root: [기계] stdout YAML: generate-skeleton next_command
 
   Root->>Co: [추론기계] co planner generate-skeleton
@@ -71,7 +71,7 @@ sequenceDiagram
     Co->>Sub: [기계] launch verification_reviewer
     Sub-->>Co: [추론형식] PASS or FAIL JSON
   end
-  Co->>Co: [기계] write review state, notes, events, fingerprint on PASS
+  Co->>Co: [기계] write review state, notes, and fingerprint on PASS
   Co-->>Root: [기계] stdout YAML: show draft or patch valid findings
 
   alt review FAIL
@@ -92,7 +92,7 @@ sequenceDiagram
   else user approves
     User-->>Root: [유저] approval
     Root->>Co: [추론기계] co planner approve-draft --comment ...
-    Co->>Co: [기계] set phase=planning and append approval event
+    Co->>Co: [기계] set phase=planning and store approval note when provided
   end
 
   Root->>Co: [추론기계] co planner validate

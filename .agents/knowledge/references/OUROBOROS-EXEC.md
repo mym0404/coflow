@@ -144,7 +144,7 @@ Use this mapping when comparing designs:
 - Ouroboros parallel AC execution maps conceptually to `tasks.yaml.depends_on`, but coflow currently executes one `Doing` task at a time.
 - Ouroboros subagent isolation maps conceptually to Codex CLI subagents used by `co` during planning review and scoring, not to arbitrary executor delegation.
 - Ouroboros post-execution QA maps conceptually to coflow final verification tasks and required evidence records.
-- Ouroboros event sourcing maps conceptually to coflow `events.yaml` and `evidence.yaml`, but coflow uses simpler YAML append-style state rather than SQLite replay.
+- Ouroboros event sourcing maps only loosely to coflow `status.yaml`, `evidence.yaml`, and `notes.yaml`; coflow does not maintain an executor event log or SQLite replay model.
 
 Do not import Ouroboros parallelism into coflow by default.
 If coflow adopts parallel execution later, it should first make ownership, evidence, and collision boundaries mechanically explicit in `co`.

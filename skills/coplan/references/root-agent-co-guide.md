@@ -33,7 +33,7 @@ Root-agent rules:
 Exceptions:
 
 - `co show --file draft` prints raw Markdown for user review.
-- `co show --file plan|tasks|planning-context|interview|status|notes|events|evidence` prints the requested YAML file.
+- `co show --file plan|tasks|planning-context|interview|status|notes|evidence` prints the requested YAML file.
 - `co review-context` prints a large YAML context bundle for diagnostics.
 
 ## General Commands
@@ -114,15 +114,15 @@ Root action:
 
 | Command | Expected stdout keys | Root action |
 |---|---|---|
-| `co exec status` | `ok`, `phase`, `active_plan`, `current_task`, `progress`, `allowed_now`, `forbidden_now`, `required_action`, maybe `next_command` | Follow `required_action`, `allowed_now`, and `forbidden_now`. |
+| `co exec status` | `ok`, `phase`, `active_plan`, `current_task`, `progress`, `allowed_now`, `forbidden_now`, `notes`, `required_action`, maybe `next_command` | Follow `required_action`, `allowed_now`, `forbidden_now`, and task notes. |
 | `co exec start` | `ok`, `phase`, `required_action`, `next_command` | Run `next_command`. |
 | `co exec ready` | `ok`, `ready_now`, `required_action` | Claim exactly one ready task or return to status. |
 | `co exec claim <task-id>` | `ok`, `task`, `status`, `required_action` | Execute the task and record evidence. |
-| `co exec show-task <task-id>` | `ok`, `task`, `status`, `evidence`, `required_action` | Use task contract for implementation and verification. |
-| `co exec evidence add ... --stdin` | `ok`, `record`, `required_action`, maybe `next_command` | If success and complete, run `next_command`; otherwise continue repair/fix. |
-| `co exec repair <task-id> ...` | `ok`, `event`, `note`, `required_action` | Rerun verification and record evidence. |
+| `co exec show-task <task-id>` | `ok`, `task`, `status`, `evidence`, `notes`, `required_action` | Use task contract, evidence, and task notes for implementation and verification. |
+| `co exec evidence add ... --stdin` | `ok`, `record`, maybe `note`, `required_action`, maybe `next_command` | If success and complete, run `next_command`; if failed, use the risk note and continue repair/fix. |
+| `co exec repair <task-id> ...` | `ok`, `note`, `required_action` | Rerun verification and record evidence. |
 | `co exec complete-task <task-id>` | `ok`, `task`, `status`, `required_action`, `next_command` | Run `next_command` to choose the next task or finish. |
-| `co exec halt ...` | `ok`, `phase`, `halt`, `event`, `note`, `required_action` | Stop and report the halt reason to the user. |
+| `co exec halt ...` | `ok`, `phase`, `halt`, `note`, `required_action` | Stop and report the halt reason to the user. |
 | `co exec finish` | `ok`, `phase`, `required_action` | Report final completion. |
 
 ## Executor Status Output
@@ -145,12 +145,16 @@ progress:
   ready_now: []
 allowed_now:
   - co exec evidence add --task T1 ...
+  - co note append risk --text "..." --why "..." --affects task:T1 --source "coexec"
   - co exec repair T1 --field <path> --reason "..."
   - co exec complete-task T1
   - co exec halt --kind user_decision|external_environment --task T1 --reason "..."
 forbidden_now:
   - claim another task while T1 is Doing
 required_action: Continue current_task; record evidence, repair, complete, or halt using allowed_now.
+notes:
+  recent: []
+  current_task: []
 ```
 
 Root action:

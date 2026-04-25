@@ -15,7 +15,7 @@ The command runs both required reviewers in parallel:
 - `contract_reviewer`
 - `verification_reviewer`
 
-Both must return `PASS`. Results are stored in `notes.yaml`, `events.yaml`, and `status.yaml.review`.
+Both must return `PASS`. Results are stored in `notes.yaml` and `status.yaml.review`.
 
 ## Rerun Discipline
 
