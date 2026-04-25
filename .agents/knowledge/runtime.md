@@ -25,6 +25,7 @@ The reliable control point is therefore the `co.py flow` contract:
 - `co.py` owns bundle files, validation, state transitions, notes, evidence records, review freshness, halt gates, and finish gates.
 - Root-agent-facing skill instructions should keep the agent as a thin `root_action` adapter.
 - If `co.py` can decide or validate a step mechanically, prefer adding the rule to `skills/coplan/scripts/co.py` over relying on prose instructions in the root agent skill.
+- Mechanical continuation belongs inside `co.py`; root-facing `root_action` values must represent real root boundaries, not instructions to call another flow command.
 - Codex CLI subagents are implementation details of `co.py`; their JSON output is normalized by `co.py` before it reaches the root agent.
 - Codex CLI subagents run through isolated ephemeral `codex exec` calls with parent session env stripped, coflow nesting depth capped, and plugin feature loading disabled so MCP/plugin state from the parent session does not affect bounded JSON judgments while user-level Codex instructions remain available.
 - Interview routing, scoring thresholds, reviewer prompts, and reviewer schemas are CLI internals in `skills/coplan/scripts/co.py`, not root-agent reference material.
@@ -97,7 +98,8 @@ Use `skills/coplan/SKILL.md` as the planner entrypoint.
 Core flow:
 
 - initialize with `skills/coplan/scripts/co.py flow init --plan-id <id> --title "<title>" --stdin` or `--prompt "<request>"`.
-- continue with `skills/coplan/scripts/co.py flow next`.
+- let `flow init`, `flow respond`, and `flow evidence` advance internally until the next root boundary.
+- use `skills/coplan/scripts/co.py flow next` to resume an active bundle and ask the CLI for the next root boundary.
 - ask exact `root_action.question` values and pipe answers to `co.py flow respond --stdin`.
 - present exact `root_action.plan_seed` values and pipe approval or feedback to `co.py flow respond --stdin`.
 - run `coexec` when `root_action.type` becomes `execute_task` or `repair_task`; report and stop on `report_halt`, `report_complete`, or `report_error`.
@@ -114,7 +116,6 @@ Core flow:
 - start each loop with `skills/coplan/scripts/co.py flow next`.
 - implement only `root_action.task` when `root_action.type: execute_task`.
 - record verification output with `co.py flow evidence`.
-- repair only task envelope fields with `co.py flow repair`.
 - halt only through `co.py flow halt`.
 - report completion only after `root_action.type: report_complete`.
 - report CLI errors only through `root_action.type: report_error`.

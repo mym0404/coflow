@@ -15,10 +15,8 @@ sequenceDiagram
   User->>Root: [유저] planning 요청
   Root->>Co: [추론기계] co.py flow init --plan-id ... --title ... --stdin
   Co->>Co: [기계] exec.yaml, interview.yaml, 초기 bundle file 생성
-  Co-->>Root: [기계] root_action=continue_flow
 
-  loop root boundary에 도달할 때까지
-    Root->>Co: [추론기계] co.py flow next or co.py flow respond --stdin
+  loop CLI 내부 진행이 root boundary에 도달할 때까지
     Co->>Co: [기계] interview, status, tasks 읽기
     alt 사용자 답변이 필요함
       Co-->>Root: [기계] root_action=ask_user

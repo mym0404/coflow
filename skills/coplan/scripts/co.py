@@ -142,7 +142,6 @@ FLOW_ROOT_ACTION_TYPES = {
     "report_halt",
     "report_complete",
     "report_error",
-    "continue_flow",
 }
 FLOW_LOG_FILE = "flow_log.ndjson"
 CURRENT_FLOW_COMMAND = None
@@ -2328,10 +2327,6 @@ def active_plan_summary(bundle):
     return {"id": bundle["plan_id"]}
 
 
-def continue_flow_action(message):
-    return {"type": "continue_flow", "message": message, "next_command": f"{CLI_COMMAND_NAME} flow next"}
-
-
 def report_error_action(message):
     return {
         "type": "report_error",
@@ -3601,26 +3596,75 @@ def advance_flow_until_boundary(feedback=None):
     return advance_executor_until_boundary()
 
 
-def status_flow_boundary():
-    bundle = load_bundle()
+def flow_status_diagnostic(bundle):
     phase = bundle["status"].get("phase")
+    diagnostic = {
+        "active_plan": active_plan_summary(bundle),
+    }
     if phase == "planning":
         pending = bundle["interview"].get("pending_user_question")
-        action = ask_user_action(pending) if pending else continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to continue planning.")
+        if pending:
+            diagnostic["pending_boundary"] = "ask_user"
+            diagnostic["message"] = "A user answer is waiting."
+            diagnostic["response_command"] = f"{CLI_COMMAND_NAME} flow respond --stdin"
+        else:
+            diagnostic["pending_boundary"] = "internal_cli_progress"
+            diagnostic["message"] = "Run the next command to let the CLI advance to a root boundary."
+            diagnostic["next_command"] = f"{CLI_COMMAND_NAME} flow next"
     elif phase == "seed_review":
-        action = present_plan_seed_action(bundle["plan_dir"])
+        diagnostic["pending_boundary"] = "present_plan_seed"
+        diagnostic["message"] = "A plan seed review is waiting."
+        diagnostic["response_command"] = f"{CLI_COMMAND_NAME} flow respond --stdin"
     elif phase == "ready_for_exec":
-        action = continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to continue mechanical transitions.")
+        diagnostic["pending_boundary"] = "internal_cli_progress"
+        diagnostic["message"] = "Run the next command to let the CLI claim the next task or finish execution."
+        diagnostic["next_command"] = f"{CLI_COMMAND_NAME} flow next"
     elif phase == "executing":
         current_id = bundle["status"].get("current_task")
-        action = task_root_action(bundle, "execute_task") if current_id else continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to claim or finish.")
+        diagnostic["pending_boundary"] = "execute_task" if current_id else "internal_cli_progress"
+        diagnostic["message"] = (
+            "A current task is waiting."
+            if current_id
+            else "Run the next command to let the CLI claim the next task or finish execution."
+        )
+        if current_id:
+            diagnostic["evidence_command"] = f"{CLI_COMMAND_NAME} flow evidence --stdin"
+        else:
+            diagnostic["next_command"] = f"{CLI_COMMAND_NAME} flow next"
     elif phase == "halted":
-        action = report_halt_action(bundle)
+        diagnostic["pending_boundary"] = "report_halt"
+        diagnostic["message"] = "The active plan is halted."
     elif phase == "complete":
-        action = report_complete_action(bundle)
+        diagnostic["pending_boundary"] = "report_complete"
+        diagnostic["message"] = "The active plan is complete."
     else:
-        action = continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` after fixing the current phase.")
-    return {"root_action": action}
+        diagnostic["pending_boundary"] = "invalid_phase"
+        diagnostic["message"] = "Fix the saved phase before continuing."
+    return diagnostic
+
+
+def print_flow_status_snapshot():
+    bundle = load_bundle()
+    phase = bundle["status"].get("phase")
+    result = {
+        "contract_version": FLOW_CONTRACT_VERSION,
+        "mode": flow_mode_from_phase(phase),
+        "phase": phase,
+        "diagnostic": flow_status_diagnostic(bundle),
+    }
+    print_yaml(result)
+
+
+def print_flow_status_error(message):
+    print_yaml(
+        {
+            "contract_version": FLOW_CONTRACT_VERSION,
+            "mode": "error",
+            "diagnostic": {
+                "message": message,
+            },
+        }
+    )
 
 
 def print_flow_boundary(result):
@@ -3643,11 +3687,8 @@ def flow_init(args):
         phase_before=None,
         phase_after="planning",
     )
-    print_flow_result(
-        {"phase": "planning"},
-        continue_flow_action(f"Run `{CLI_COMMAND_NAME} flow next` to continue planning."),
-        mode="planner",
-    )
+    result = advance_flow_until_boundary()
+    print_flow_boundary(result)
 
 
 def flow_next(_args):
@@ -3656,8 +3697,7 @@ def flow_next(_args):
 
 
 def flow_status(_args):
-    result = status_flow_boundary()
-    print_flow_boundary(result)
+    print_flow_status_snapshot()
 
 
 def flow_respond(args):
@@ -3872,7 +3912,7 @@ def main(argv=None):
     CURRENT_FLOW_COMMAND = flow_command_name(args)
     try:
         require_yaml()
-        if getattr(args, "command", None) == "flow" and getattr(args, "flow_command", None) != "init":
+        if getattr(args, "command", None) == "flow" and getattr(args, "flow_command", None) not in {"init", "status"}:
             log_flow_command_start(active_plan_dir_or_none(), CURRENT_FLOW_COMMAND)
         args.func(args)
     except GateError as exc:
@@ -3890,6 +3930,9 @@ def main(argv=None):
         return 1
     except ExError as exc:
         if getattr(args, "command", None) == "flow":
+            if getattr(args, "flow_command", None) == "status":
+                print_flow_status_error(str(exc))
+                return 1
             log_flow_command_error(str(exc))
             print_flow_error(str(exc))
             return 1

@@ -9,6 +9,8 @@ Use the smallest command that matches the changed surface:
 - CLI syntax: `python3 -m py_compile skills/coplan/scripts/co.py`.
 - CLI command shape: `skills/coplan/scripts/co.py --help` and `skills/coplan/scripts/co.py flow --help`.
 - Flow log smoke: `co.py flow init --stdin`, `co.py flow next`, and `co.py flow respond --stdin` should append core events to `.agents/plan/{plan-id}/flow_log.ndjson`.
+- Root action contract: no `co.py flow` command should emit `root_action.type: continue_flow`; mechanical continuation should happen inside `co.py`.
+- Status diagnostics: `co.py flow status` should be read-only YAML without `root_action`.
 - Knowledge routing: verify that every `.agents/knowledge/*.md` route named by `AGENTS.md` exists.
 - Repo path references: verify important repo-root-relative paths named in `AGENTS.md` and `.agents/knowledge/*.md` exist.
 - User-facing graph docs: verify that `COPLAN.md` and `COEXEC.md` exist, each contains both `sequenceDiagram` and `flowchart`, and each keeps role labels and styling where Mermaid supports it.

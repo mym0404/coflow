@@ -12,7 +12,8 @@ description: active plan bundle의 current task를 `co.py flow`로 실행하는 
 ## 핵심 계약
 
 - 실행 시작과 재개는 `co.py flow next`로 한다.
-- 모든 `co.py flow` 응답은 YAML이며 `contract_version`, `mode`, `phase`, `root_action`을 확인한다.
+- 실행 루프용 `co.py flow` 응답은 YAML이며 `contract_version`, `mode`, `phase`, `root_action`을 확인한다.
+- `co.py flow status`는 read-only 진단 YAML이며 root action source가 아니다.
 - Root agent는 `root_action.task`에 있는 current task만 구현한다.
 - `root_action.plan_seed`는 승인된 전역 계약이다. Current task와 충돌하지 않는지 확인하고, scope, non-goals, constraints, success criteria, verification expectations, execution boundaries를 바꾸는 선택이 필요하면 halt한다.
 - 검증 명령은 root agent가 실제 shell에서 실행한다.
@@ -23,17 +24,51 @@ description: active plan bundle의 current task를 `co.py flow`로 실행하는 
 
 ## Flow Stdout
 
-`co.py flow`는 root agent가 처리해야 할 정보만 YAML로 반환한다.
+실행 루프용 `co.py flow`는 root agent가 처리해야 할 정보만 YAML로 반환한다.
 stdout 전체가 다음 행동을 정하는 계약이므로, root agent는 이 YAML을 읽고 `root_action` 하나만 수행한다.
 
 ```yaml
 contract_version: '1'
 mode: executor
-phase: ready_for_exec
+phase: executing
 root_action:
-  type: continue_flow
-  message: Run `co.py flow next` to continue mechanical transitions.
-  next_command: co.py flow next
+  type: execute_task
+  active_plan:
+    id: example-plan
+  task:
+    id: T01
+    title: Implement approved change
+  plan_seed:
+    seed:
+      goal: User-approved goal
+      constraints: []
+      non_goals: []
+      success_criteria: []
+      verification_expectations: []
+      execution_boundaries: []
+  status:
+    id: T01
+    title: Implement approved change
+    status: Doing
+    next_required_action: Continue T01 until required evidence is recorded and completion gates pass.
+  task_view:
+    files:
+      primary:
+        - path/to/file
+      generated_incidental: []
+    verification:
+      evidence_required: true
+      steps:
+        - id: verify
+          command: test command
+          success_signal: expected signal
+    acceptance_criteria:
+      - expected behavior
+  evidence_state:
+    required:
+      - evidence/t01-verify.txt
+    recorded: []
+  notes: []
 ```
 
 ## 공통 YAML 필드
@@ -63,11 +98,11 @@ CLI가 task 선택, repair boundary, evidence state, halt, finish 판단을 끝�
 ### `root_action.type`
 
 `root_action`의 종류다.
-이 값이 `continue_flow`, `execute_task`, `repair_task`, `report_halt`, `report_complete`, `report_error` 중 무엇인지 확인하고, 아래 같은 이름의 섹션만 따른다.
+이 값이 `execute_task`, `repair_task`, `report_halt`, `report_complete`, `report_error` 중 무엇인지 확인하고, 아래 같은 이름의 섹션만 따른다.
 
 ### `root_action.*_command`
 
-`next_command` 같은 command field는 root agent가 실행할 CLI 명령이다.
+command field는 root agent가 실행할 CLI 명령이다.
 명령 문자열을 재구성하지 말고 그대로 실행한다.
 
 ### `root_action.plan_seed`
@@ -96,6 +131,11 @@ Root agent는 이 task 하나만 구현한다.
 실패 evidence가 있을 때만 포함된다.
 `repair_task`에서는 이 값을 먼저 보고 같은 task 범위 안에서 실패 원인을 고친다.
 
+## Status Stdout
+
+`co.py flow status`는 현재 저장 상태를 확인하는 read-only 진단 명령이다.
+이 명령의 YAML은 `root_action`을 포함하지 않으며, 다음 task 수행 근거로 쓰지 않는다.
+
 ## 시작
 
 아래 명령으로 현재 execution boundary를 받는다.
@@ -111,27 +151,6 @@ Root agent는 이 task 하나만 구현한다.
 `root_action.type`을 먼저 확인하고, 해당 action 하나만 수행한다.
 `root_action`에 없는 task 선택, 완료 처리, skip, reorder, finish를 만들지 않는다.
 Bundle YAML file을 직접 수정하지 않는다.
-
-### `continue_flow`
-
-샘플 YAML:
-
-```yaml
-contract_version: '1'
-mode: executor
-phase: ready_for_exec
-root_action:
-  type: continue_flow
-  message: Run `co.py flow next` to continue mechanical transitions.
-  next_command: co.py flow next
-```
-
-무엇인지:
-CLI가 executor 내부 전이를 더 진행할 수 있다는 뜻이다.
-
-해야 할 일:
-`root_action.next_command`를 그대로 실행한다.
-보통 `co.py flow next`이며, 명령이 오래 걸려도 임의로 중지하거나 같은 명령을 중복 실행하지 않는다.
 
 ### `execute_task`
 
@@ -188,7 +207,7 @@ CLI가 current task를 claim했고, root agent가 구현과 검증을 수행해�
 `root_action.task`와 `root_action.task_view` 범위 안에서만 구현한다.
 `root_action.plan_seed`의 goal, constraints, non-goals, success criteria, verification expectations, execution boundaries와 충돌하지 않는지 확인한다.
 `root_action.task_view.verification.steps[*]`의 command를 실제 shell에서 실행하고, 결과를 `co.py flow evidence`로 기록한다.
-필요한 evidence를 기록한 뒤 `co.py flow next`를 실행해 다음 root boundary를 받는다.
+`co.py flow evidence`가 반환한 다음 `root_action`을 처리한다.
 Task 범위를 바꾸거나 plan seed를 바꿔야 하면 구현하지 말고 `co.py flow halt`로 멈춘다.
 
 ### `repair_task`
@@ -248,8 +267,7 @@ root_action:
 해야 할 일:
 `root_action.latest_failed_evidence`와 verification output을 기준으로 실패 원인을 확인한다.
 현재 task 범위 안에서만 수정하고, 같은 verification을 다시 실행한다.
-재실행 결과를 `co.py flow evidence`로 기록한 뒤 `co.py flow next`를 실행한다.
-Task metadata가 현재 구현 현실과 맞지 않지만 사용자-facing contract가 바뀌지 않는 경우에만 `co.py flow repair`를 사용한다.
+재실행 결과를 `co.py flow evidence`로 기록하고, 반환된 다음 `root_action`을 처리한다.
 
 ### `report_halt`
 
@@ -362,16 +380,7 @@ printf '%s\n' "$output" | ~/.codex/skills/coplan/scripts/co.py flow evidence \
 
 `--success false`는 실패 output을 기록하고 `repair_task` 경계로 돌아가야 한다는 뜻이다.
 
-## Repair와 Halt
-
-Task metadata가 현재 구현 현실과 맞지 않지만 사용자-facing contract는 바뀌지 않는 경우에만 repair를 사용한다.
-
-```bash
-~/.codex/skills/coplan/scripts/co.py flow repair \
-  --field <files|implementation_notes|verification path> \
-  --reason "<reason>" \
-  --set|--add|--remove <yaml-value>
-```
+## Halt
 
 사용자 결정이나 외부 환경 때문에 더 진행할 수 없으면 halt한다.
 
