@@ -32,6 +32,7 @@ It currently ships two skills:
 - There is no project-level test runner or CI config in this repository.
 - For CLI changes, use `python3 -m py_compile skills/coplan/scripts/co.py` and targeted `skills/coplan/scripts/co.py ...` command checks.
 - For knowledge changes, verify root routing and repo-root-relative path references.
+- For semantic plan-exec quality checks, use `.agents/knowledge/semantic-verification.md` after mechanical verification.
 
 ## UI Surface
 
@@ -42,6 +43,7 @@ It currently ships two skills:
 - Evergreen repo knowledge starts at `.agents/knowledge/index.md`.
 - Runtime and architecture: `.agents/knowledge/runtime.md`.
 - Verification and blind spots: `.agents/knowledge/verification.md`.
+- Semantic verification checklist: `.agents/knowledge/semantic-verification.md`.
 - Ouroboros inspiration references: `.agents/knowledge/references/OUROBOROUS.md`.
 - Skill source docs remain under `skills/` because those files are root-agent runtime skill content, not a secondary knowledge home.
 - `skills/*/references/` is not used; all root-agent runtime instructions belong directly in `skills/*/SKILL.md`.

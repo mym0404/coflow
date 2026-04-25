@@ -22,6 +22,7 @@ coflow contains Codex skills that coordinate a plan-then-execute workflow throug
 
 - Runtime, architecture, skill-prompt boundaries, and flow log analysis: `.agents/knowledge/runtime.md`.
 - Verification and blind spots: `.agents/knowledge/verification.md`.
+- Semantic model-judged verification checklist: `.agents/knowledge/semantic-verification.md`.
 - Ouroboros reference overview: `.agents/knowledge/references/OUROBOROUS.md`.
 - Ouroboros plan reference: `.agents/knowledge/references/OUROBOROS-PLAN.md`.
 - Ouroboros exec reference: `.agents/knowledge/references/OUROBOROS-EXEC.md`.

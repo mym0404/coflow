@@ -11,6 +11,7 @@ Use the smallest command that matches the changed surface:
 - Flow log smoke: `co.py flow init --stdin`, `co.py flow next`, and `co.py flow respond --stdin` should append core events to `.agents/plan/{plan-id}/flow_log.ndjson`.
 - Root action contract: no `co.py flow` command should emit `root_action.type: continue_flow`; mechanical continuation should happen inside `co.py`.
 - Status diagnostics: `co.py flow status` should be read-only YAML without `root_action`.
+- Semantic verification: use `.agents/knowledge/semantic-verification.md` after mechanical checks when changed artifacts affect plan-exec behavior, skill prompts, CLI prompt composition, or verification gates.
 - Knowledge routing: verify that every `.agents/knowledge/*.md` route named by `AGENTS.md` exists.
 - Repo path references: verify important repo-root-relative paths named in `AGENTS.md` and `.agents/knowledge/*.md` exist.
 - User-facing graph docs: verify that `COPLAN.md` and `COEXEC.md` exist, each contains both `sequenceDiagram` and `flowchart`, and each keeps role labels and styling where Mermaid supports it.
@@ -35,6 +36,7 @@ For knowledge-only changes, verify:
 
 - Root `AGENTS.md` routes to `.agents/knowledge/index.md`.
 - `.agents/knowledge/index.md` routes to `.agents/knowledge/runtime.md` and `.agents/knowledge/verification.md`.
+- `.agents/knowledge/verification.md` routes semantic model review to `.agents/knowledge/semantic-verification.md`.
 - Knowledge docs use repo-root-relative paths, not workspace-absolute paths.
 - Product docs under `skills/` remain treated as shipped content, not as an alternate knowledge home.
 - `skills/*/SKILL.md` stays synchronized with `.agents/knowledge/runtime.md` and the shipped skill behavior without Mermaid diagrams.
