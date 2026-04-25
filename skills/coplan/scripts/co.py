@@ -1,16 +1,34 @@
 #!/usr/bin/env python3
 import argparse
-import concurrent.futures
 import hashlib
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from co.agents import (
+    REQUIRED_REVIEWERS,
+    ask_next,
+    bundle_author,
+    closure_auditor,
+    contract_reviewer,
+    score as score_agent,
+    seed_architect,
+    seed_feedback,
+    seed_reviser,
+    verification_reviewer,
+)
+from co.agents.spawn import (
+    CODEX_AGENT_DEFAULT_MODEL,
+    CODEX_AGENT_DEFAULT_SANDBOX,
+    CODEX_AGENT_REASONING_EFFORT,
+)
+from co.agents.spawn import run_codex_agent as spawn_codex_agent
+from co.agents.spawn import run_codex_agents_parallel as spawn_codex_agents_parallel
+from co.shared.errors import ExError, GateError
 
 
 PLAN_ROOT = Path(".agents/plan")
@@ -30,7 +48,6 @@ VALID_PHASES = {
 TASK_STATES = {"Todo", "Doing", "Done"}
 REVIEW_STATUSES = {"not_run", "passed", "failed"}
 REVIEW_STAGES = {"bundle"}
-REQUIRED_REVIEWERS = ("contract_reviewer", "verification_reviewer")
 INTERVIEW_STATUSES = {"open", "closed"}
 INTERVIEW_TRACK_STATUSES = {"open", "closed"}
 SEED_REVIEW_STATUSES = {"not_presented", "presented", "approved"}
@@ -111,28 +128,6 @@ AMBIGUITY_FLOORS = {
     "success_criteria_clarity": 0.70,
     "context_clarity": 0.60,
 }
-CODEX_AGENT_DEFAULT_MODEL = "gpt-5.5"
-CODEX_AGENT_DEFAULT_SANDBOX = "read-only"
-CODEX_AGENT_REASONING_EFFORT = "medium"
-CODEX_AGENT_DEFAULT_TIMEOUT_SECONDS = 600
-CODEX_AGENT_CLI_NAME = "codex"
-CODEX_AGENT_MAX_COFLOW_DEPTH = 5
-CODEX_AGENT_DEPTH_ENV_KEY = "_COFLOW_CODEX_DEPTH"
-CODEX_AGENT_DISABLE_FEATURES = ("plugins",)
-CODEX_AGENT_STRIP_ENV_KEYS = {
-    "OUROBOROS_AGENT_RUNTIME",
-    "OUROBOROS_LLM_BACKEND",
-    "CODEX_SESSION_ID",
-    "CODEX_THREAD_ID",
-    "CODEX_PARENT_AGENT_ID",
-    "CODEX_EXECUTION_ID",
-    "CLAUDECODE",
-}
-CODEX_AGENT_WRAPPER_MAGIC_HEADERS = (
-    b"\xcf\xfa\xed\xfe",
-    b"\xce\xfa\xed\xfe",
-    b"\x7fELF",
-)
 NOTE_KINDS = {"discovery", "decision", "risk", "revision", "repair", "halt"}
 CONTRACT_REPAIR_ROOTS = {"files", "implementation_notes", "verification"}
 FLOW_CONTRACT_VERSION = "1"
@@ -148,18 +143,6 @@ FLOW_ROOT_ACTION_TYPES = {
 }
 FLOW_LOG_FILE = "flow_log.ndjson"
 CURRENT_FLOW_COMMAND = None
-
-
-class ExError(Exception):
-    pass
-
-
-class GateError(ExError):
-    def __init__(self, message, data, required_action, next_command=None):
-        super().__init__(message)
-        self.data = data
-        self.required_action = required_action
-        self.next_command = next_command
 
 
 def require_yaml():
@@ -341,36 +324,48 @@ def append_flow_log(plan_dir, event, **fields):
         return
 
 
-def summarize_codex_output(role, output):
+def summarize_agent_output(role, output):
     if not isinstance(output, dict):
         return {"type": type(output).__name__}
-    if role == "score":
-        return {
-            "project_mode": output.get("project_mode"),
-            "weakest_dimension": output.get("weakest_dimension"),
-        }
-    if role == "ask-next":
-        return {
-            "action": output.get("action"),
-            "route": output.get("route"),
-            "track": output.get("track"),
-        }
-    if role == "bundle_author":
-        tasks = output.get("tasks", {}).get("tasks", []) if isinstance(output.get("tasks"), dict) else []
-        return {
-            "task_count": len(tasks) if isinstance(tasks, list) else None,
-        }
-    if role in {"seed_feedback", "seed_reviser"}:
-        return {
-            "action": output.get("action"),
-            "track": output.get("track"),
-        }
-    if role in REQUIRED_REVIEWERS:
-        return {
-            "status": output.get("status"),
-            "issue_count": len(output.get("issues", [])) if isinstance(output.get("issues"), list) else None,
-        }
+    summarizers = {
+        ask_next.ROLE: ask_next.summarize,
+        score_agent.ROLE: score_agent.summarize,
+        closure_auditor.ROLE: closure_auditor.summarize,
+        seed_architect.ROLE: seed_architect.summarize,
+        seed_reviser.ROLE: seed_reviser.summarize,
+        bundle_author.ROLE: bundle_author.summarize,
+        contract_reviewer.ROLE: contract_reviewer.summarize,
+        verification_reviewer.ROLE: verification_reviewer.summarize,
+        seed_feedback.ROLE: seed_feedback.summarize,
+    }
+    summarize = summarizers.get(role)
+    if summarize:
+        return summarize(output)
     return {key: output.get(key) for key in ("status", "action", "summary") if key in output}
+
+
+def run_codex_agent(role, prompt, schema, *, cwd=None, plan_dir=None):
+    return spawn_codex_agent(
+        role,
+        prompt,
+        schema,
+        cwd=cwd,
+        plan_dir=plan_dir,
+        append_flow_log=append_flow_log,
+        hash_text=hash_text,
+        summarize_output=summarize_agent_output,
+    )
+
+
+def run_codex_agents_parallel(agent_specs, *, cwd=None, plan_dir=None):
+    return spawn_codex_agents_parallel(
+        agent_specs,
+        cwd=cwd,
+        plan_dir=plan_dir,
+        append_flow_log=append_flow_log,
+        hash_text=hash_text,
+        summarize_output=summarize_agent_output,
+    )
 
 
 def flow_command_name(args):
@@ -404,224 +399,6 @@ def log_flow_command_error(message):
         error=str(message),
         phase_after=current_phase_or_none(plan_dir) if plan_dir else None,
     )
-
-
-def is_codex_wrapper_binary(path):
-    try:
-        with open(path, "rb") as handle:
-            return handle.read(4) in CODEX_AGENT_WRAPPER_MAGIC_HEADERS
-    except OSError:
-        return False
-
-
-def find_real_codex_cli(skip):
-    skip_path = Path(skip).resolve()
-    for directory in os.environ.get("PATH", "").split(os.pathsep):
-        candidate = Path(directory) / CODEX_AGENT_CLI_NAME
-        if not candidate.is_file() or not os.access(candidate, os.X_OK):
-            continue
-        if candidate.resolve() == skip_path:
-            continue
-        if is_codex_wrapper_binary(candidate):
-            continue
-        return str(candidate)
-    return None
-
-
-def resolve_codex_cli_path():
-    candidate = shutil.which(CODEX_AGENT_CLI_NAME) or CODEX_AGENT_CLI_NAME
-    path = Path(candidate).expanduser()
-    if not path.exists() or not is_codex_wrapper_binary(path):
-        return str(path) if path.exists() else candidate
-    return find_real_codex_cli(path) or str(path)
-
-
-def build_codex_child_env(base_env=None):
-    env = dict(os.environ if base_env is None else base_env)
-    for key in CODEX_AGENT_STRIP_ENV_KEYS:
-        env.pop(key, None)
-    for key in list(env):
-        if "MCP" in key or "RMCP" in key:
-            env.pop(key, None)
-    try:
-        depth = int(env.get(CODEX_AGENT_DEPTH_ENV_KEY, "0")) + 1
-    except (TypeError, ValueError):
-        depth = 1
-    if depth > CODEX_AGENT_MAX_COFLOW_DEPTH:
-        raise ExError(f"maximum coflow Codex subagent depth exceeded: {CODEX_AGENT_MAX_COFLOW_DEPTH}")
-    env[CODEX_AGENT_DEPTH_ENV_KEY] = str(depth)
-    return env
-
-
-def write_output_schema_tempfile(schema):
-    handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", delete=False)
-    try:
-        json.dump(schema, handle, ensure_ascii=False)
-        handle.flush()
-        return Path(handle.name)
-    finally:
-        handle.close()
-
-
-def build_codex_exec_command(
-    *,
-    output_last_message_path,
-    output_schema_path=None,
-    cwd=None,
-    model=CODEX_AGENT_DEFAULT_MODEL,
-    sandbox=CODEX_AGENT_DEFAULT_SANDBOX,
-):
-    command = [
-        resolve_codex_cli_path(),
-        "exec",
-        "--json",
-        "--skip-git-repo-check",
-        "--ephemeral",
-        "-c",
-        f'model_reasoning_effort="{CODEX_AGENT_REASONING_EFFORT}"',
-        "--sandbox",
-        sandbox,
-        "-C",
-        str(cwd or Path.cwd()),
-        "--output-last-message",
-        str(output_last_message_path),
-    ]
-    for feature in CODEX_AGENT_DISABLE_FEATURES:
-        command.extend(["--disable", feature])
-    if output_schema_path:
-        command.extend(["--output-schema", str(output_schema_path)])
-    if model:
-        command.extend(["--model", model])
-    command.append("-")
-    return command
-
-
-def read_last_message_json(path):
-    text = Path(path).read_text(encoding="utf-8").strip()
-    if not text:
-        raise ExError("codex exec produced an empty last message")
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            try:
-                return json.loads(text[start : end + 1])
-            except json.JSONDecodeError:
-                pass
-    raise ExError("codex exec last message is not JSON")
-
-
-def run_codex_agent(role, prompt, schema, *, cwd=None, plan_dir=None):
-    output_handle = tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False)
-    output_path = Path(output_handle.name)
-    output_handle.close()
-    schema_path = write_output_schema_tempfile(schema)
-    command = build_codex_exec_command(
-        output_last_message_path=output_path,
-        output_schema_path=schema_path,
-        cwd=cwd,
-    )
-    start = datetime.now(timezone.utc)
-    append_flow_log(
-        plan_dir,
-        "codex_agent.start",
-        role=role,
-        prompt_hash=hash_text(prompt),
-        prompt_bytes=len(prompt.encode("utf-8")),
-    )
-    logged_end = False
-    try:
-        process = subprocess.run(
-            command,
-            input=prompt,
-            text=True,
-            capture_output=True,
-            check=False,
-            cwd=str(cwd or Path.cwd()),
-            env=build_codex_child_env(),
-            timeout=CODEX_AGENT_DEFAULT_TIMEOUT_SECONDS,
-        )
-        if process.returncode != 0:
-            stderr = process.stderr.strip()
-            stdout = process.stdout.strip()
-            detail = stderr or stdout or f"exit code {process.returncode}"
-            append_flow_log(
-                plan_dir,
-                "codex_agent.end",
-                role=role,
-                status="failed",
-                duration_ms=int((datetime.now(timezone.utc) - start).total_seconds() * 1000),
-                error_hash=hash_text(detail),
-            )
-            logged_end = True
-            raise ExError(f"codex agent {role} failed: {detail}")
-        output = read_last_message_json(output_path)
-        if not isinstance(output, dict):
-            append_flow_log(
-                plan_dir,
-                "codex_agent.end",
-                role=role,
-                status="failed",
-                duration_ms=int((datetime.now(timezone.utc) - start).total_seconds() * 1000),
-                error_hash=hash_text("output must be a JSON object"),
-            )
-            logged_end = True
-            raise ExError(f"codex agent {role} output must be a JSON object")
-        append_flow_log(
-            plan_dir,
-            "codex_agent.end",
-            role=role,
-            status="passed",
-            duration_ms=int((datetime.now(timezone.utc) - start).total_seconds() * 1000),
-            output_summary=summarize_codex_output(role, output),
-        )
-        logged_end = True
-        return {
-            "role": role,
-            "model": CODEX_AGENT_DEFAULT_MODEL,
-            "sandbox": CODEX_AGENT_DEFAULT_SANDBOX,
-            "model_reasoning_effort": CODEX_AGENT_REASONING_EFFORT,
-            "command": command,
-            "output": output,
-            "stdout_tail": process.stdout.strip().splitlines()[-20:],
-        }
-    except Exception as exc:
-        if not logged_end:
-            append_flow_log(
-                plan_dir,
-                "codex_agent.end",
-                role=role,
-                status="failed",
-                duration_ms=int((datetime.now(timezone.utc) - start).total_seconds() * 1000),
-                error_hash=hash_text(str(exc)),
-            )
-        raise
-    finally:
-        output_path.unlink(missing_ok=True)
-        schema_path.unlink(missing_ok=True)
-
-
-def run_codex_agents_parallel(agent_specs, *, cwd=None, plan_dir=None):
-    if not agent_specs:
-        return {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(agent_specs)) as executor:
-        future_to_role = {
-            executor.submit(
-                run_codex_agent,
-                spec["role"],
-                spec["prompt"],
-                spec["schema"],
-                cwd=cwd,
-                plan_dir=plan_dir,
-            ): spec["role"]
-            for spec in agent_specs
-        }
-        return {
-            future_to_role[future]: future.result()
-            for future in concurrent.futures.as_completed(future_to_role)
-        }
 
 
 def parse_yaml_value(text):
@@ -1897,257 +1674,6 @@ def question_options_for_kind(kind):
     ]
 
 
-def ask_next_schema():
-    option = question_option_schema()
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "action": {"type": "string", "enum": ["ask_user", "record_fact", "ready_for_score"]},
-            "route": {"type": "string", "enum": sorted(INTERVIEW_ROUTES)},
-            "track": {"type": "string", "enum": list(INTERVIEW_REQUIRED_TRACKS)},
-            "question": {"type": "string"},
-            "answer": {"type": "string"},
-            "source": {"type": "string"},
-            "skip_eligible": {"type": "boolean"},
-            "skip_kind": {"type": "string", "enum": ["defer", "decide_later"]},
-            "options": {
-                "type": "array",
-                "minItems": 2,
-                "maxItems": 3,
-                "items": option,
-            },
-            "reason": {"type": "string"},
-        },
-        "required": [
-            "action",
-            "route",
-            "track",
-            "question",
-            "answer",
-            "source",
-            "skip_eligible",
-            "skip_kind",
-            "options",
-            "reason",
-        ],
-    }
-
-
-def score_schema():
-    component = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "clarity_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "justification": {"type": "string"},
-        },
-        "required": ["clarity_score", "justification"],
-    }
-    option = question_option_schema()
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "project_mode": {"type": "string", "enum": ["greenfield", "brownfield"]},
-            "components": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "goal_clarity": component,
-                    "constraint_clarity": component,
-                    "success_criteria_clarity": component,
-                    "context_clarity": component,
-                },
-                "required": [
-                    "goal_clarity",
-                    "constraint_clarity",
-                    "success_criteria_clarity",
-                    "context_clarity",
-                ],
-            },
-            "weakest_dimension": {"type": "string"},
-            "recommended_followup": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "route": {"type": "string", "enum": sorted(INTERVIEW_USER_ROUTES)},
-                    "track": {"type": "string", "enum": list(INTERVIEW_REQUIRED_TRACKS)},
-                    "question": {"type": "string"},
-                    "options": {
-                        "type": "array",
-                        "minItems": 2,
-                        "maxItems": 3,
-                        "items": option,
-                    },
-                },
-                "required": ["route", "track", "question", "options"],
-            },
-            "summary": {"type": "string"},
-        },
-        "required": ["project_mode", "components", "weakest_dimension", "recommended_followup", "summary"],
-    }
-
-
-def closure_audit_schema():
-    option = question_option_schema()
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "action": {"type": "string", "enum": ["pass", "ask_user"]},
-            "route": {"type": "string", "enum": sorted(INTERVIEW_USER_ROUTES)},
-            "track": {"type": "string", "enum": list(INTERVIEW_REQUIRED_TRACKS)},
-            "question": {"type": "string"},
-            "summary": {"type": "string"},
-            "material_blockers": {"type": "array", "items": {"type": "string"}},
-            "skip_eligible": {"type": "boolean"},
-            "skip_kind": {"type": "string", "enum": ["defer", "decide_later"]},
-            "options": {
-                "type": "array",
-                "minItems": 2,
-                "maxItems": 3,
-                "items": option,
-            },
-        },
-        "required": [
-            "action",
-            "route",
-            "track",
-            "question",
-            "summary",
-            "material_blockers",
-            "skip_eligible",
-            "skip_kind",
-            "options",
-        ],
-    }
-
-
-def plan_seed_schema():
-    string_array = {"type": "array", "items": {"type": "string"}}
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "title": {"type": "string"},
-            "goal": {"type": "string"},
-            "context": string_array,
-            "non_goals": string_array,
-            "constraints": string_array,
-            "success_criteria": string_array,
-            "verification_expectations": string_array,
-            "execution_boundaries": string_array,
-            "source_round_ids": string_array,
-            "deferred_items": string_array,
-            "summary": {"type": "string"},
-        },
-        "required": [
-            "title",
-            "goal",
-            "context",
-            "non_goals",
-            "constraints",
-            "success_criteria",
-            "verification_expectations",
-            "execution_boundaries",
-            "source_round_ids",
-            "deferred_items",
-            "summary",
-        ],
-    }
-
-
-def review_schema():
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "status": {"type": "string", "enum": ["PASS", "FAIL"]},
-            "summary": {"type": "string"},
-            "issues": {"type": "array", "items": {"type": "string"}},
-            "optional_tightenings": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["status", "summary", "issues", "optional_tightenings"],
-    }
-
-
-def ask_next_prompt(plan_dir):
-    return (
-        "You are the coplan Socratic interviewer. Inspect the original request, transcript, ambiguity snapshot, and bundle context; choose the single next action that most reduces implementation-changing ambiguity.\n"
-        "Return JSON only. Ask about the user's intent, core change, ownership, public behavior, or non-obvious tradeoff. Do not ask process questions about how to build a plan bundle, how to verify the planner, or how many agents to run unless that is the user's actual task.\n"
-        "If user judgment is needed, action=ask_user with route user_decision or code_plus_decision. If a repo/research fact is enough and directly grounded in context, action=record_fact with route code_fact or research_confirmation. If at least three answered rounds exist and no material question remains, action=ready_for_score.\n"
-        "Use tracks only as extraction labels: scope, non_goals, outputs, verification, constraints, stop_conditions. Never force a checklist order across those tracks.\n"
-        "Brownfield hint: prefer questions about the intended behavioral boundary, source of truth, API/protocol ownership, lifecycle/recovery, migration, or cross-client impact when those could change the implementation.\n"
-        "Perspective panel: user-intent guardian asks what outcome changes; maintainer asks what existing behavior must survive; executor asks what static decision it would otherwise have to make; verifier asks what proof is minimally sufficient; Seed Closer asks which unresolved choice would invalidate the plan.\n"
-        "Answer prefix guidance: ask concise questions that invite concrete answers like 'Change...', 'Preserve...', 'Exclude...', or 'Prove with...'.\n"
-        "Always populate options with 2-3 concise UI choices and exactly one recommended=true item. For action=ask_user, options must not decide for the user; they should offer useful answer directions plus room for free-form correction. For other actions, use neutral fallback options.\n"
-        "Set skip_eligible=true only for useful details that can be intentionally deferred without changing the plan contract; set skip_eligible=false for material implementation decisions. Use skip_kind=defer for optional detail and decide_later for explicit future decisions.\n\n"
-        f"Context:\n{agent_context(plan_dir)}"
-    )
-
-
-def score_prompt(plan_dir, project_mode):
-    return (
-        "You are the coplan ambiguity scoring agent. Score requirement clarity from 0.0 to 1.0. Use low-variance judgment; scoring_temperature_intent is 0.1. Return JSON only.\n"
-        "Score goal_clarity, constraint_clarity, success_criteria_clarity, and context_clarity. For greenfield, still provide context_clarity but it will not be weighted.\n"
-        f"Requested project_mode: {project_mode}.\n"
-        "Treat intentional deferrals in deferred_items as settled unless they would force the executor to choose behavior, ownership, migration, or verification policy. Set recommended_followup to the single best question for exposing a user-owned tradeoff or brownfield context gap before execution. For brownfield work with weak context_clarity, prefer a repository-specific code/docs/behavior boundary question.\n"
-        "recommended_followup must include options with 2-3 concise UI choices and exactly one recommended=true item. Options must help the user answer, not make hidden planning decisions.\n"
-        "Do not declare readiness in prose; the CLI will compute weighted clarity and ambiguity.\n\n"
-        f"Context:\n{agent_context(plan_dir)}"
-    )
-
-
-def closure_audit_prompt(plan_dir):
-    return (
-        "You are the coplan closure_auditor using Seed Closer criteria. Decide only whether the interview is ready for plan_seed extraction and bundle authoring. Return JSON only.\n"
-        "A low ambiguity score is not sufficient. PASS only when no implementation-changing decision remains for ownership/source of truth, API/protocol, lifecycle/recovery, migration, cross-client impact, execution boundaries, or verification expectations.\n"
-        "If any material decision remains, action=ask_user and ask exactly one highest-impact follow-up. Do not ask about planning mechanics, bundle files, reviewer setup, or validation process unless the user's task is specifically about those systems.\n"
-        "Always populate options with 2-3 concise UI choices and exactly one recommended=true item. For action=ask_user, options must preserve the user's final judgment and allow free-form correction. For action=pass, use neutral fallback options.\n"
-        "Set skip_eligible=false for material blockers. Use skip_eligible=true only when the item can be intentionally deferred without changing executor behavior.\n\n"
-        f"Context:\n{agent_context(plan_dir)}"
-    )
-
-
-def plan_seed_prompt(plan_dir):
-    return (
-        "You are the coplan seed_architect. Extract an internal plan seed from the original request, interview transcript, ambiguity ledger, closure audit, and deferred items. Return JSON only.\n"
-        "The seed is the source of truth for bundle_author. It must capture the user's intended core change, constraints, success criteria, non-goals, context, verification expectations, and execution boundaries without inventing new decisions.\n"
-        "Use the six tracks only as classification hints; do not require every track to have a transcript item. Preserve intentional deferrals as deferred_items only when they do not force executor planning.\n"
-        "No TBD placeholders. If something material is missing, the closure audit should have failed earlier; extract the best settled contract from the transcript.\n\n"
-        f"Context:\n{agent_context(plan_dir)}"
-    )
-
-
-def seed_reviser_prompt(plan_dir, feedback):
-    return (
-        "You are the coplan seed_reviser. Rewrite plan_seed.yaml seed content for wording-only user feedback. Return JSON only using the same seed schema.\n"
-        "Preserve the existing goal, constraints, non-goals, success criteria, execution boundaries, verification expectations, deferred items, and source_round_ids unless the wording can be clarified without changing meaning.\n"
-        "If the feedback requires a semantic change, keep the existing seed meaning and summarize the limitation in wording; the CLI routes semantic feedback through interview instead.\n\n"
-        f"Feedback:\n{feedback}\n\n"
-        f"Context:\n{agent_context(plan_dir)}"
-    )
-
-
-def reviewer_prompt(plan_dir, reviewer):
-    if reviewer == "contract_reviewer":
-        focus = (
-            "Review whether tasks.yaml faithfully implements plan_seed.yaml. "
-            "Block hidden decisions, scope drift, contradictions, task DAG assumptions, file scope problems, and acceptance criteria that ask execution to choose between materially different user-visible behaviors."
-        )
-    else:
-        focus = (
-            "Review whether verification commands, evidence, final verification, and success signals are minimally sufficient for plan_seed.yaml. "
-            "Block if verification would not prove the user's intended behavior or if it asks the executor to invent proof policy."
-        )
-    return (
-        f"You are the {reviewer} for a coplan bundle. {focus}\n"
-        "Return JSON only with status PASS or FAIL. This is a post-author bundle review. Do not re-check mechanical schema fields owned by CLI validation unless the semantics are meaningless.\n\n"
-        f"Context:\n{agent_context(plan_dir)}"
-    )
-
-
 def create_pending_question(
     plan_dir,
     interview,
@@ -2618,9 +2144,13 @@ def score_interview_internal(plan_dir, mode="auto"):
     output = run_interview_codex_agent(
         plan_dir,
         interview,
-        "score",
-        score_prompt(plan_dir, mode),
-        score_schema(),
+        score_agent.ROLE,
+        score_agent.prompt(context=agent_context(plan_dir), project_mode=mode),
+        score_agent.schema(
+            option_schema=question_option_schema(),
+            tracks=INTERVIEW_REQUIRED_TRACKS,
+            user_routes=INTERVIEW_USER_ROUTES,
+        ),
     )
     interview = load_yaml(plan_dir / "interview.yaml")
     score = normalize_ambiguity_score(output, interview, mode)
@@ -2684,9 +2214,13 @@ def run_closure_audit_internal(plan_dir):
     output = run_interview_codex_agent(
         plan_dir,
         interview,
-        "closure_auditor",
-        closure_audit_prompt(plan_dir),
-        closure_audit_schema(),
+        closure_auditor.ROLE,
+        closure_auditor.prompt(context=agent_context(plan_dir)),
+        closure_auditor.schema(
+            option_schema=question_option_schema(),
+            tracks=INTERVIEW_REQUIRED_TRACKS,
+            user_routes=INTERVIEW_USER_ROUTES,
+        ),
     )
     interview = load_yaml(plan_dir / "interview.yaml")
     audit = {
@@ -2739,9 +2273,9 @@ def write_plan_seed_internal(plan_dir):
     output = run_interview_codex_agent(
         plan_dir,
         interview,
-        "seed_architect",
-        plan_seed_prompt(plan_dir),
-        plan_seed_schema(),
+        seed_architect.ROLE,
+        seed_architect.prompt(context=agent_context(plan_dir)),
+        seed_architect.schema(),
     )
     latest = interview.get("ambiguity", {}).get("latest") or {}
     plan_seed = {
@@ -2774,9 +2308,9 @@ def revise_plan_seed_internal(plan_dir, feedback):
     output = run_interview_codex_agent(
         plan_dir,
         interview,
-        "seed_reviser",
-        seed_reviser_prompt(plan_dir, feedback),
-        plan_seed_schema(),
+        seed_reviser.ROLE,
+        seed_reviser.prompt(context=agent_context(plan_dir), feedback=feedback),
+        seed_reviser.schema(),
     )
     latest = interview.get("ambiguity", {}).get("latest") or {}
     plan_seed = {
@@ -2868,9 +2402,13 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
             output = run_interview_codex_agent(
                 plan_dir,
                 interview,
-                "ask-next",
-                ask_next_prompt(plan_dir),
-                ask_next_schema(),
+                ask_next.ROLE,
+                ask_next.prompt(context=agent_context(plan_dir)),
+                ask_next.schema(
+                    option_schema=question_option_schema(),
+                    routes=INTERVIEW_ROUTES,
+                    tracks=INTERVIEW_REQUIRED_TRACKS,
+                ),
             )
             if output["action"] == "ask_user":
                 interview = load_yaml(plan_dir / "interview.yaml")
@@ -2950,9 +2488,13 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
         output = run_interview_codex_agent(
             plan_dir,
             interview,
-            "ask-next",
-            ask_next_prompt(plan_dir),
-            ask_next_schema(),
+            ask_next.ROLE,
+            ask_next.prompt(context=agent_context(plan_dir)),
+            ask_next.schema(
+                option_schema=question_option_schema(),
+                routes=INTERVIEW_ROUTES,
+                tracks=INTERVIEW_REQUIRED_TRACKS,
+            ),
         )
         if output["action"] == "ask_user":
             interview = load_yaml(plan_dir / "interview.yaml")
@@ -2983,118 +2525,6 @@ def advance_interview_until_boundary(plan_dir, max_steps=8):
             score_interview_internal(plan_dir)
             continue
     raise ExError("interview flow did not reach a root boundary")
-
-
-def bundle_author_schema():
-    string_array = {"type": "array", "items": {"type": "string"}}
-    verification_step = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "id": {"type": "string"},
-            "command": {"type": "string"},
-            "success_signal": {"type": "string"},
-        },
-        "required": ["id", "command", "success_signal"],
-    }
-    expected_evidence = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "step_id": {"type": "string"},
-            "file": {"type": "string", "pattern": "^evidence/[^/].+"},
-        },
-        "required": ["step_id", "file"],
-    }
-    task = {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "id": {"type": "string"},
-            "kind": {"type": "string", "enum": ["execution", "checkpoint", "final_verification"]},
-            "title": {"type": "string"},
-            "depends_on": string_array,
-            "start_when": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {"description": {"type": "string"}},
-                "required": ["description"],
-            },
-            "files": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "primary": string_array,
-                    "generated_incidental": string_array,
-                },
-                "required": ["primary", "generated_incidental"],
-            },
-            "context": {"type": "string"},
-            "must_do": string_array,
-            "must_not_do": string_array,
-            "implementation_notes": string_array,
-            "verification": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "evidence_required": {"type": "boolean"},
-                    "steps": {"type": "array", "items": verification_step},
-                },
-                "required": ["evidence_required", "steps"],
-            },
-            "acceptance_criteria": string_array,
-            "expected_evidence": {"type": "array", "items": expected_evidence},
-            "reopen_when": string_array,
-        },
-        "required": [
-            "id",
-            "kind",
-            "title",
-            "depends_on",
-            "start_when",
-            "files",
-            "context",
-            "must_do",
-            "must_not_do",
-            "implementation_notes",
-            "verification",
-            "acceptance_criteria",
-            "expected_evidence",
-            "reopen_when",
-        ],
-    }
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "tasks": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {"tasks": {"type": "array", "items": task}},
-                "required": ["tasks"],
-            },
-            "summary": {"type": "string"},
-        },
-        "required": ["tasks", "summary"],
-    }
-
-
-def bundle_author_prompt(plan_dir, review_results=None, feedback=None):
-    extra = ""
-    if review_results:
-        extra += "\nBundle review findings to fix:\n" + dump_json(review_results)
-    if feedback:
-        extra += "\nUser seed feedback to apply:\n" + feedback
-    return (
-        "You are the coplan bundle_author. Produce final tasks.yaml content as JSON only.\n"
-        "Use plan_seed.yaml as the source of truth. Inspect the repository only to ground implementation boundaries and commands. Do not edit files directly. Do not leave TBD placeholders.\n"
-        "Do not expand, narrow, or reinterpret the seed. Project goal, constraints, non-goals, success criteria, execution boundaries, and verification expectations must be projected into task context, must_do, must_not_do, acceptance_criteria, and verification.\n"
-        "Every task must satisfy the coflow task schema and include at least one final_verification task.\n"
-        "Every expected_evidence.file must be a relative artifact path under evidence/, such as evidence/t01-preflight.txt.\n"
-        "Keep execution decisions static so the executor does not need to plan.\n\n"
-        f"Context:\n{agent_context(plan_dir)}"
-        f"{extra}"
-    )
 
 
 def write_authored_bundle(plan_dir, output):
@@ -3131,7 +2561,19 @@ def run_review_internal(plan_dir):
     status = load_yaml(plan_dir / "status.yaml")
     reviewer_outputs = run_codex_agents_parallel(
         [
-            {"role": reviewer, "prompt": reviewer_prompt(plan_dir, reviewer), "schema": review_schema()}
+            {
+                "role": reviewer,
+                "prompt": (
+                    contract_reviewer.prompt(context=agent_context(plan_dir))
+                    if reviewer == contract_reviewer.ROLE
+                    else verification_reviewer.prompt(context=agent_context(plan_dir))
+                ),
+                "schema": (
+                    contract_reviewer.schema()
+                    if reviewer == contract_reviewer.ROLE
+                    else verification_reviewer.schema()
+                ),
+            }
             for reviewer in REQUIRED_REVIEWERS
         ],
         cwd=Path.cwd(),
@@ -3216,9 +2658,14 @@ def author_and_review_until_boundary(plan_dir, feedback=None):
     for _ in range(3):
         author_feedback = "\n".join(item for item in [feedback, validation_feedback] if item)
         output = run_codex_agent(
-            "bundle_author",
-            bundle_author_prompt(plan_dir, review_results=review_results, feedback=author_feedback),
-            bundle_author_schema(),
+            bundle_author.ROLE,
+            bundle_author.prompt(
+                context=agent_context(plan_dir),
+                review_results=review_results,
+                feedback=author_feedback,
+                dump_json=dump_json,
+            ),
+            bundle_author.schema(),
             cwd=Path.cwd(),
             plan_dir=plan_dir,
         )["output"]
@@ -3326,21 +2773,6 @@ def approve_and_finalize(plan_dir, comment):
     require_review_passed(plan_dir, status, "flow finalize")
 
 
-def feedback_schema():
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "action": {"type": "string", "enum": ["approve", "wording_change", "meaning_change"]},
-            "track": {"type": "string", "enum": list(INTERVIEW_REQUIRED_TRACKS)},
-            "question": {"type": "string"},
-            "answer": {"type": "string"},
-            "summary": {"type": "string"},
-        },
-        "required": ["action", "track", "question", "answer", "summary"],
-    }
-
-
 def classify_seed_feedback(plan_dir, feedback):
     normalized = feedback.strip().lower()
     approval_words = {"approve", "approved", "yes", "ok", "ship", "looks good", "승인", "좋아", "좋습니다", "확정"}
@@ -3352,13 +2784,14 @@ def classify_seed_feedback(plan_dir, feedback):
             "answer": feedback,
             "summary": "Plan seed approved.",
         }
-    prompt = (
-        "Classify this plan seed feedback for coflow. Return JSON only.\n"
-        "approve means the user accepts the plan seed. wording_change means text-only polish. "
-        "meaning_change means scope, output, verification, constraints, or stop conditions changed.\n\n"
-        f"Plan seed:\n{dump_json(load_plan_seed(plan_dir))}\n\nFeedback:\n{feedback}"
-    )
-    return run_codex_agent("seed_feedback", prompt, feedback_schema(), cwd=Path.cwd(), plan_dir=plan_dir)["output"]
+    prompt = seed_feedback.prompt(plan_seed_json=dump_json(load_plan_seed(plan_dir)), feedback=feedback)
+    return run_codex_agent(
+        seed_feedback.ROLE,
+        prompt,
+        seed_feedback.schema(tracks=INTERVIEW_REQUIRED_TRACKS),
+        cwd=Path.cwd(),
+        plan_dir=plan_dir,
+    )["output"]
 
 
 def apply_seed_feedback(plan_dir, feedback):
