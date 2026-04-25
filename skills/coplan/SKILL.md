@@ -18,6 +18,18 @@ You are the user-facing planner adapter. You do not choose interview routing, am
 - `Transport Only`: ask the exact `root_action.question`, present the exact `root_action.draft`, and send user replies back through `co flow respond --stdin`.
 - `Planner Only`: do not implement source changes while using this skill.
 
+## Required Context
+
+Always read these context docs first before running `co flow` with this skill.
+
+Read [references/root-agent-co-guide.md](references/root-agent-co-guide.md) for the root-agent, CLI, Codex CLI subagent, stdout YAML, `root_action`, allowed command, and forbidden action contract.
+
+Read [references/workflow.md](references/workflow.md) as the synchronized structured workflow reference for how user, root agent, `co` CLI, Codex CLI agents, and bundle files interact.
+
+Use [references/bundle-schema.md](references/bundle-schema.md) and [references/gates-and-examples.md](references/gates-and-examples.md) to understand the plan-execute contract that `co flow` enforces. Use [references/interview-algorithm.md](references/interview-algorithm.md) and [references/codex-cli-reviewer.md](references/codex-cli-reviewer.md) only as maintenance or debugging context for CLI internals.
+
+These references explain the system boundary. They do not authorize calling removed commands, choosing hidden flow steps, or editing CLI-owned bundle files.
+
 ## Bundle Contract
 
 Start every new plan with:

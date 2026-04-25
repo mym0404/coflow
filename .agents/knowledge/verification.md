@@ -12,7 +12,8 @@ Use the smallest command that matches the changed surface:
 - Flow log smoke: `co flow init`, `co flow next`, and `co flow respond --stdin` should append core events to `.agents/plan/{plan-id}/flow_log.ndjson`.
 - Knowledge routing: verify that every `.agents/knowledge/*.md` route named by `AGENTS.md` exists.
 - Repo path references: verify important repo-root-relative paths named in `AGENTS.md` and `.agents/knowledge/*.md` exist.
-- Runtime graphs: verify that `COPLAN.md` and `COEXEC.md` exist, each contains both `sequenceDiagram` and `flowchart`, and each keeps role edge color styling where Mermaid supports it.
+- User-facing graph docs: verify that `COPLAN.md` and `COEXEC.md` exist, each contains both `sequenceDiagram` and `flowchart`, and each keeps role labels and styling where Mermaid supports it.
+- Agent workflow references: verify that `skills/coplan/references/workflow.md` and `skills/coexec/references/workflow.md` exist, contain no Mermaid diagrams, and describe root actions, CLI-owned state, gates, and non-negotiable boundaries in structured text.
 
 ## Coverage Notes
 
@@ -31,5 +32,6 @@ For knowledge-only changes, verify:
 - `.agents/knowledge/index.md` routes to `.agents/knowledge/runtime.md` and `.agents/knowledge/verification.md`.
 - Knowledge docs use repo-root-relative paths, not workspace-absolute paths.
 - Product docs under `skills/` remain treated as shipped content, not as an alternate knowledge home.
-- `COPLAN.md` and `COEXEC.md` stay synchronized with `.agents/knowledge/runtime.md` and the shipped skill behavior.
+- Agent-facing workflow references stay synchronized with `.agents/knowledge/runtime.md` and the shipped skill behavior without Mermaid diagrams.
+- `COPLAN.md` and `COEXEC.md` remain user-facing graph docs, not agent-facing knowledge routes.
 - `.agents/knowledge/runtime.md` describes `flow_log.ndjson` structure and how to analyze root/CLI/subagent responsibility boundaries.

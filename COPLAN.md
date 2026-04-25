@@ -76,13 +76,6 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-  subgraph Legend["Edge Color Legend"]
-    LUser["[유저] user input edge: green"]
-    LRoot["[추론기계] root transport/action edge: blue"]
-    LMachine["[기계] deterministic CLI/runtime edge: gray"]
-    LReason["[추론형식] schema-bound AI judgment edge: yellow"]
-  end
-
   Start(["[유저] planning request"])
   Init["[추론기계] root runs co flow init"]
   RootAction{"[기계] root_action.type"}
@@ -107,8 +100,7 @@ flowchart TD
   Phase -->|draft_review| FClassify
   Phase -->|planning or ready_for_exec| EStart
 
-  subgraph Interview["[기계] interview iterator inside co flow"]
-    direction TD
+  subgraph Interview
     IRead["read interview/status/context"]
     IPending{"pending user question?"}
     IClosure{"closure gates pass?"}
@@ -132,8 +124,7 @@ flowchart TD
   IEmitAsk --> RootAction
   IClose --> AAuthor
 
-  subgraph Author["[기계] bundle authoring and review loop inside co flow"]
-    direction TD
+  subgraph Author
     AAuthor["[추론형식] bundle_author returns draft, plan, tasks"]
     AValidate["[기계] validate bundle schema and gates"]
     AReviewFork{{"[기계] run reviewers in parallel"}}
@@ -154,8 +145,7 @@ flowchart TD
 
   AEmitDraft --> RootAction
 
-  subgraph Feedback["[기계] draft feedback handling inside co flow"]
-    direction TD
+  subgraph Feedback
     FClassify{"[추론형식] approval, wording change, or meaning change?"}
     FApprove["[기계] approve draft and finalize"]
     FWording["[기계] rewrite wording through bundle_author"]

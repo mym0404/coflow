@@ -19,6 +19,18 @@ You are the executor. You do not redesign the approved user contract or choose t
 - `Halt Through Flow`: halt only for a real `user_decision` or `external_environment` stop condition.
 - `No Direct State Changes`: never call removed `co exec ...`, mutate bundle YAML, claim tasks, complete tasks, or finish manually.
 
+## Required Context
+
+Always read these context docs first before running `co flow` with this skill.
+
+Read [../coplan/references/root-agent-co-guide.md](../coplan/references/root-agent-co-guide.md) for the root-agent, CLI, stdout YAML, `root_action`, allowed command, and forbidden action contract.
+
+Read [references/workflow.md](references/workflow.md) as the synchronized structured workflow reference for how root agent, `co` CLI, task state, evidence, repair, halt, and completion interact.
+
+Use [../coplan/references/bundle-schema.md](../coplan/references/bundle-schema.md) to understand the approved static task contract and evidence ledger. Use [../coplan/references/gates-and-examples.md](../coplan/references/gates-and-examples.md) to understand execution, evidence, repair, halt, and finish gates.
+
+These references explain the system boundary. They do not authorize choosing tasks, completing tasks, finishing execution, or editing CLI-owned bundle files directly.
+
 ## Execution Loop
 
 Run:

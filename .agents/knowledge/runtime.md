@@ -38,18 +38,21 @@ Keep planning and execution concepts synchronized whenever changing either side 
 - When changing the executable plan bundle, planner gates, task schema, or `exec.yaml` handoff, verify that `coexec` can still execute the approved plan without making new planning decisions.
 - When changing executor behavior, status output, repair rules, evidence handling, halt rules, or finish gates, verify that `coplan` still produces a bundle with enough static contract for that executor.
 - The planner side owns the approved user contract; the executor side owns sequential local execution, progress state, evidence, repair, halt, and finish.
-- If a behavior change blurs that boundary, update `skills/coplan/SKILL.md`, `skills/coexec/SKILL.md`, `skills/coplan/references/root-agent-co-guide.md`, `skills/coplan/references/bundle-schema.md`, `skills/coplan/references/gates-and-examples.md`, `skills/coexec/README.md`, and `skills/coplan/scripts/co` together.
+- If a behavior change blurs that boundary, update `skills/coplan/SKILL.md`, `skills/coexec/SKILL.md`, `skills/coplan/references/root-agent-co-guide.md`, `skills/coplan/references/bundle-schema.md`, `skills/coplan/references/gates-and-examples.md`, `skills/coplan/references/workflow.md`, `skills/coexec/references/workflow.md`, and `skills/coplan/scripts/co` together.
 
-## Runtime Graphs
+## Workflow Docs
 
-Keep the root runtime graph docs synchronized with workflow behavior.
+Keep user-facing graphs and agent-facing workflow references synchronized with runtime behavior.
 
-- `COPLAN.md` describes planner-side `co flow` behavior.
-- `COEXEC.md` describes executor-side `co flow` behavior.
-- Each file must contain both Mermaid graph types: `sequenceDiagram` for actor and time order, and `flowchart` for branches, loops, and parallel or repeated work.
-- Mermaid flowcharts use a consistent role edge color palette: green for `[유저]`, blue for `[추론기계]`, gray for `[기계]`, and yellow for `[추론형식]`.
-- When changing planner or executor state transitions, root actions, interview loops, review loops, draft feedback handling, evidence handling, repair, halt, or finish behavior, update the relevant graph docs in the same change.
-- Planner parallel reviewer execution must stay visible in `COPLAN.md`; executor single-current-task execution must stay visible in `COEXEC.md`.
+- `COPLAN.md` and `COEXEC.md` are user-facing docs and the only Mermaid graph home.
+- User-facing graph docs must contain both Mermaid graph types: `sequenceDiagram` for actor and time order, and `flowchart` for branches, loops, and parallel or repeated work.
+- User-facing Mermaid flowcharts use consistent role labels and styling: green for `[유저]`, blue for `[추론기계]`, gray for `[기계]`, and yellow for `[추론형식]`.
+- `skills/coplan/references/workflow.md` is the graph-free planner workflow reference for agents.
+- `skills/coexec/references/workflow.md` is the graph-free executor workflow reference for agents.
+- Agent-facing workflow references should use tables, root action contracts, state ownership rules, gates, and non-negotiable boundaries instead of Mermaid diagrams.
+- When changing planner or executor state transitions, root actions, interview loops, review loops, draft feedback handling, evidence handling, repair, halt, or finish behavior, update the relevant user-facing graph doc and the relevant graph-free workflow reference in the same change.
+- Planner parallel reviewer execution must stay visible in `COPLAN.md` and `skills/coplan/references/workflow.md`; executor single-current-task execution must stay visible in `COEXEC.md` and `skills/coexec/references/workflow.md`.
+- Agent-facing skill context should read `skills/*/references/workflow.md`, not `COPLAN.md` or `COEXEC.md`.
 
 ## Flow Log
 
@@ -113,6 +116,8 @@ If a needed change would alter user-visible behavior, acceptance criteria, task 
 
 ## Reference Tier
 
+- `skills/coplan/references/workflow.md` describes the graph-free planner workflow for agents.
+- `skills/coexec/references/workflow.md` describes the graph-free executor workflow for agents.
 - `skills/coplan/references/root-agent-co-guide.md` describes the shared `co flow` stdout contract.
 - `skills/coplan/references/bundle-schema.md` describes bundle files and required fields.
 - `skills/coplan/references/gates-and-examples.md` describes planner and executor gates.

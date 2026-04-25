@@ -43,11 +43,6 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-  subgraph Legend["Edge Color Legend"]
-    LRoot["[추론기계] root edit/verify/report edge: blue"]
-    LMachine["[기계] deterministic CLI/runtime edge: gray"]
-  end
-
   Start(["[추론기계] enter coexec"])
   Next["[추론기계] root runs co flow next"]
   Phase{"[기계] phase"}

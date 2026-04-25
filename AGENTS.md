@@ -13,7 +13,8 @@ It currently ships two skills:
 - Python CLI: `skills/coplan/scripts/co`.
 - Codex skill manifests and instructions: `skills/*/SKILL.md`.
 - YAML metadata: `skills/*/agents/openai.yaml`.
-- Markdown runtime and reference docs: `COPLAN.md`, `COEXEC.md`, `skills/*/README.md`, and `skills/coplan/references/*.md`.
+- User-facing Markdown docs: `COPLAN.md` and `COEXEC.md`.
+- Agent-facing skill references: `skills/coplan/references/*.md` and `skills/coexec/references/*.md`.
 
 ## Runtime Start
 
@@ -42,3 +43,4 @@ It currently ships two skills:
 - Verification and blind spots: `.agents/knowledge/verification.md`.
 - Ouroboros inspiration references: `.agents/knowledge/references/OUROBOROUS.md`.
 - Skill source docs remain under `skills/` because those files are the shipped product content, not a secondary knowledge home.
+- `COPLAN.md` and `COEXEC.md` are user-facing docs, not agent-facing knowledge routes.

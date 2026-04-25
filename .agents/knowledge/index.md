@@ -20,7 +20,7 @@ coflow contains Codex skills that coordinate a plan-then-execute workflow throug
 
 ## Routes
 
-- Runtime, architecture, runtime graphs, and flow log analysis: `.agents/knowledge/runtime.md`.
+- Runtime, architecture, workflow docs, and flow log analysis: `.agents/knowledge/runtime.md`.
 - Verification and blind spots: `.agents/knowledge/verification.md`.
 - Ouroboros reference overview: `.agents/knowledge/references/OUROBOROUS.md`.
 - Ouroboros plan reference: `.agents/knowledge/references/OUROBOROS-PLAN.md`.
@@ -28,6 +28,8 @@ coflow contains Codex skills that coordinate a plan-then-execute workflow throug
 - Ouroboros eval reference: `.agents/knowledge/references/OUROBOROS-EVAL.md`.
 - Planner source contract: `skills/coplan/SKILL.md`.
 - Executor source contract: `skills/coexec/SKILL.md`.
+- Planner workflow reference: `skills/coplan/references/workflow.md`.
+- Executor workflow reference: `skills/coexec/references/workflow.md`.
 - Shared CLI guide: `skills/coplan/references/root-agent-co-guide.md`.
 - Bundle schema: `skills/coplan/references/bundle-schema.md`.
 
@@ -35,6 +37,7 @@ coflow contains Codex skills that coordinate a plan-then-execute workflow throug
 
 The Markdown and YAML files under `skills/` are installed skill content and product documentation.
 Do not migrate them into `.agents/knowledge` unless the skill layout itself is being redesigned.
+`COPLAN.md` and `COEXEC.md` are user-facing docs; do not use them as agent-facing workflow references.
 
 ## UI Surface
 
