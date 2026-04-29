@@ -1,3 +1,6 @@
+> [!NOTE]
+> 일단 내가 써봐야겟다
+
 할거
 1. who consumes evidences, notes
 2. semantic verificaiton
