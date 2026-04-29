@@ -37,7 +37,7 @@ For knowledge-only changes, verify:
 - Root `AGENTS.md` routes to `.agents/knowledge/index.md`.
 - `.agents/knowledge/index.md` routes to `.agents/knowledge/runtime.md` and `.agents/knowledge/verification.md`.
 - `.agents/knowledge/verification.md` routes semantic model review to `.agents/knowledge/semantic-verification.md`.
-- Knowledge docs use repo-root-relative paths, not workspace-absolute paths.
+- Coflow knowledge docs use repo-root-relative paths; external repository roots may be workspace-absolute only when the referenced source repository is outside coflow.
 - Product docs under `skills/` remain treated as shipped content, not as an alternate knowledge home.
 - `skills/*/SKILL.md` stays synchronized with `.agents/knowledge/runtime.md` and the shipped skill behavior without Mermaid diagrams.
 - `skills/*/references/` stays empty.
